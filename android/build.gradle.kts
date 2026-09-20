@@ -1,12 +1,10 @@
-// Versions are declared here, not in the root build file: a root-level
-// `apply false` entry would still resolve the Android Gradle Plugin at
-// configuration time and break the build on machines without access to
-// Google's Maven repository. This module is only included when an SDK is
-// present (see settings.gradle.kts).
+// Versions come from `pluginManagement` in settings.gradle.kts, so they are
+// resolved only when this module is included — which happens only where an
+// Android SDK is present.
 plugins {
-    id("com.android.application") version "8.7.3"
-    id("org.jetbrains.kotlin.android") version "2.0.21"
-    id("org.jetbrains.kotlin.plugin.compose") version "2.0.21"
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 android {

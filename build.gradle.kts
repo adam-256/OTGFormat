@@ -1,13 +1,10 @@
-plugins {
-    kotlin("jvm") version "2.0.21" apply false
-}
-
-// Repositories are declared centrally in settings.gradle.kts
-// (dependencyResolutionManagement) so that the Android module can add Google's
-// Maven without every JVM module needing to know about it.
+// This root build file intentionally declares no plugins.
 //
-// The Android Gradle Plugin's version is declared inside android/build.gradle.kts
-// rather than here. A root `plugins { ... apply false }` entry still resolves
-// the plugin artifact at configuration time, which would make the whole build
-// fail on a machine with no access to Google's repository — exactly the
-// machines the JVM test suite is meant to run on.
+// Plugin versions live in settings.gradle.kts under `pluginManagement`, and
+// repositories under `dependencyResolutionManagement`. A root
+// `plugins { ... apply false }` entry still resolves the plugin artifact at
+// configuration time, which would drag the Android Gradle Plugin onto every
+// machine that configures this build — including ones with no access to
+// Google's Maven repository, where the JVM modules still have to build and
+// test. It would also put the Kotlin plugin on the root classpath, which makes
+// any subproject that requests it with a version fail outright.

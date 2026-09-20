@@ -10,6 +10,27 @@ pluginManagement {
         mavenCentral()
         gradlePluginPortal()
     }
+
+    // Plugin versions are declared here rather than in a root `plugins { ... }`
+    // block, for two reasons.
+    //
+    // A root block resolves the plugin artifact at configuration time even with
+    // `apply false`, which would fetch the Android Gradle Plugin on every
+    // machine — including the ones with no route to Google's repository, where
+    // the JVM test suite has to keep working. A version declared here is only
+    // resolved when a project actually requests that plugin, so AGP is fetched
+    // only when :android is included.
+    //
+    // And once the Kotlin plugin is on the root classpath, a subproject that
+    // asks for it *with* a version is rejected outright: "already on the
+    // classpath with an unknown version, so compatibility cannot be checked".
+    // Declaring versions once, here, avoids that entirely.
+    plugins {
+        id("org.jetbrains.kotlin.jvm") version "2.0.21"
+        id("com.android.application") version "8.7.3"
+        id("org.jetbrains.kotlin.android") version "2.0.21"
+        id("org.jetbrains.kotlin.plugin.compose") version "2.0.21"
+    }
 }
 
 dependencyResolutionManagement {
