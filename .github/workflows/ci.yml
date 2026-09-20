@@ -30,10 +30,14 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      # No Android SDK is installed here on purpose: settings.gradle.kts leaves
-      # the :android module out when there is none, and the verified surface of
-      # this project has to keep building without one.
-      - name: Run the acceptance suite
+      # The SDK is hidden on purpose. GitHub's runners ship one, but the
+      # verified surface of this project has to keep building and testing
+      # without it, and this is the job that proves the module exclusion in
+      # settings.gradle.kts actually works. The APK is built by apk.yml.
+      - name: Run the acceptance suite, with no Android SDK visible
+        env:
+          ANDROID_HOME: ""
+          ANDROID_SDK_ROOT: ""
         run: ./gradlew test --console=plain
 
       - name: Publish test reports

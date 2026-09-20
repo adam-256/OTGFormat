@@ -1,0 +1,54 @@
+name: Android APK
+
+# Builds an installable debug APK.
+#
+# The development container this project is written in has no Android SDK and
+# no route to Google's Maven repository, so the :android module cannot be
+# compiled there. GitHub's runners have both. This workflow is therefore the
+# only place the Android layer gets compiled, and its logs are the feedback
+# loop for fixing it.
+
+on:
+  push:
+    branches: ["**"]
+  workflow_dispatch:
+
+jobs:
+  apk:
+    name: Build debug APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # AGP 8.7 requires JDK 17 or newer to run, independently of the Java 11
+      # bytecode the modules target.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Report the SDK the runner provides
+        run: |
+          echo "ANDROID_HOME=${ANDROID_HOME:-unset}"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-unset}"
+          ls "${ANDROID_HOME}/platforms" 2>/dev/null || echo "no platforms directory"
+
+      - name: Install the platform and build tools this project needs
+        run: |
+          SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build the APK
+        run: ./gradlew :android:assembleDebug --console=plain --stacktrace
+
+      - name: Upload the APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OTGFormat-debug-apk
+          path: android/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
