@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      USB mass storage, SCSI transparent command set, Bulk-Only Transport.
+      class 8 / subclass 6 / protocol 80 is what every USB flash drive and card
+      reader presents, and is the only combination libaums speaks.
+    -->
+    <usb-device class="8" subclass="6" protocol="80" />
+</resources>

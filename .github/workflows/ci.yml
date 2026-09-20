@@ -6,8 +6,8 @@ on:
   pull_request:
 
 jobs:
-  phase0:
-    name: Phase 0 — FAT32 verified against dosfstools
+  verify:
+    name: FAT32 writer and USB adapter, verified against dosfstools
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -30,6 +30,9 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      # No Android SDK is installed here on purpose: settings.gradle.kts leaves
+      # the :android module out when there is none, and the verified surface of
+      # this project has to keep building without one.
       - name: Run the acceptance suite
         run: ./gradlew test --console=plain
 
@@ -40,4 +43,5 @@ jobs:
           name: test-reports
           path: |
             core/build/reports/tests/test
+            usb/build/reports/tests/test
             jvm-test/build/reports/tests/test

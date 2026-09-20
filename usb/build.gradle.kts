@@ -2,9 +2,22 @@ plugins {
     kotlin("jvm")
 }
 
-// The same libaums extraction as the `usb` module: an AAR a JVM module cannot
-// consume directly, unpacked so the acceptance suite can drive the real
-// FileBlockDeviceDriver rather than a stand-in.
+/**
+ * The libaums adapter, as a plain Kotlin/JVM module.
+ *
+ * libaums' `BlockDeviceDriver` is a pure interface — `blockSize`, `blocks`,
+ * `init()`, `read(Long, ByteBuffer)`, `write(Long, ByteBuffer)` — with no
+ * Android types anywhere in its signature. That means the adapter between it
+ * and `SectorDevice`, which is where a blocks-versus-bytes or off-by-one
+ * mistake would destroy someone's drive, can be compiled and unit-tested on a
+ * plain JVM in milliseconds. The same argument as Phase 0: prove the risky
+ * layer before any of it goes near hardware.
+ *
+ * libaums ships as an AAR, which a JVM module cannot consume directly, so its
+ * `classes.jar` is extracted below. It is `compileOnly` because the Android app
+ * supplies the real artifact at runtime, and on the test classpath so the tests
+ * can implement the interface with fakes.
+ */
 val libaumsAar: Configuration by configurations.creating {
     isTransitive = false
     isCanBeConsumed = false
@@ -20,12 +33,14 @@ val extractLibaumsClasses by tasks.registering(Copy::class) {
     rename { "libaums-core.jar" }
 }
 
+// Point at the extracted jar itself. `files(task)` would put the task's output
+// *directory* on the classpath, where a nested jar is invisible to the compiler.
 val libaumsClasses: FileCollection =
     files(layout.buildDirectory.file("libaums/libaums-core.jar")).builtBy(extractLibaumsClasses)
 
 dependencies {
-    implementation(project(":core"))
-    testImplementation(project(":usb"))
+    api(project(":core"))
+    compileOnly(libaumsClasses)
     testImplementation(libaumsClasses)
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter:5.11.3")
@@ -50,9 +65,6 @@ tasks.test {
         showStandardStreams = true
         exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
     }
-    // Images are sparse, but the FAT regions are real writes; keep them
-    // somewhere predictable and inside the build directory.
-    systemProperty("otgformat.scratch", layout.buildDirectory.dir("images").get().asFile.absolutePath)
-    // The 64 GiB case walks a large FAT; give the JVM room and the test time.
+    // The transparency test holds two whole volumes in memory at once.
     maxHeapSize = "1g"
 }

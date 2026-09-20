@@ -3,18 +3,22 @@
 An Android app that formats USB mass-storage devices over OTG, without root,
 with full control of filesystem, cluster size, label, and partition table.
 
-**Current state: Phase 0 is complete.** The FAT32 + MBR writer exists as a pure
-Kotlin/JVM module and is verified against real `dosfstools` at four volume
-sizes. There is no Android code yet — by design, and see below for why.
+**Current state: Phase 0 complete and verified. Phase 1 written, with its
+risky half verified and its UI not yet compiled** — see
+[Phase 1](#phase-1--the-android-layer) for exactly which is which.
 
 ```
 ./gradlew test
 ```
 
-68 tests. On a machine with `dosfstools`, `mtools` and `file` installed, that
+111 tests. On a machine with `dosfstools`, `mtools` and `file` installed, that
 formats images at 64 MiB, 2 GiB, 8 GiB and 64 GiB, validates every one with
 `fsck.vfat`, diffs each boot sector field-by-field against `mkfs.vfat` and
-prints the table, and round-trips real files through each volume.
+prints the table, round-trips real files through each volume, and drives the
+whole thing again through the real libaums stack.
+
+The suite runs with no Android SDK present; the `:android` module is included
+only where one exists (see `settings.gradle.kts`).
 
 ```
 sudo apt-get install dosfstools mtools file
@@ -25,27 +29,33 @@ missing package; the 41 pure-arithmetic tests still run.
 
 ---
 
-## Why no Android code yet
+## Why the code is split this way
 
-Every bug in a filesystem writer is an off-by-one in a field offset. Debugging
-those through *sideload → plug in a stick → observe failure* is agonisingly
-slow. Debugging them against a file on disk with `fsck.vfat` as an oracle takes
-under a second.
+Every bug in a filesystem writer is an off-by-one in a field offset, and every
+bug in a USB adapter is a wrong unit or a wrong buffer. Debugging either through
+*sideload → plug in a stick → observe failure* is agonisingly slow. Debugging
+them against a file on disk, with `fsck.vfat` as an oracle, takes under a
+second.
 
-So the formatter core is a plain Kotlin/JVM module with no Android dependencies,
-proven correct first. By the time Android code is written, the hard part is
-already done and the app layer is permission plumbing and a progress bar.
+So both of those layers are plain Kotlin/JVM modules with no Android
+dependencies, proven before anything goes near hardware. What is left in the
+Android module is permission plumbing, a service and a screen — the parts that
+genuinely cannot exist off-device, and the parts where a mistake shows up
+immediately rather than silently corrupting a drive.
 
 ## Modules
 
-| Module | Contents | Depends on |
-|---|---|---|
-| `core` | `SectorDevice`, `Mbr`, `Fat32Layout`, `Fat32Formatter`, `Formatter` | nothing |
-| `jvm-test` | `FileSectorDevice`, the oracle bridge, the acceptance suite | `core` |
-| `android` | *(Phase 1)* `LibaumsSectorDevice`, permissions, UI | `core` |
+| Module | Contents | Android-free | Verified |
+|---|---|---|---|
+| `core` | `SectorDevice`, `Mbr`, `Fat32Layout`, `Fat32Formatter`, `Formatter` | yes | yes |
+| `usb` | `LibaumsSectorDevice`, `FormatPlanner`, `ConfirmationPolicy`, `UsbTarget` | yes | yes |
+| `jvm-test` | `FileSectorDevice`, the oracle bridge, the acceptance suite | yes | — |
+| `android` | permissions, foreground service, one-screen UI | no | **not compiled here** |
 
-The dependency arrow points one way. `core` has zero Android imports and must
-keep it that way: that property is the entire reason the tests are fast.
+The dependency arrow points one way: `android` → `usb` → `core` → nothing.
+`core` and `usb` have zero Android imports and must keep it that way. That is
+not tidiness — it is the reason the risky code can be tested in milliseconds
+instead of through a sideload-and-plug-in-a-stick cycle.
 
 Everything in `core` talks to one interface:
 
@@ -207,45 +217,138 @@ the same tools.
 
 ## Phase 1 — the Android layer
 
-Only start this now that Phase 0 is green.
+Split deliberately, on the same principle as Phase 0: everything where a bug
+destroys a drive lives in `usb`, a plain JVM module with no Android imports,
+and is tested here. Only the parts that cannot exist without an Android
+runtime — permissions, the service, the screen — live in `android`.
 
-```kotlin
-val devices = UsbMassStorageDevice.getMassStorageDevices(context)
-// request permission via UsbManager.requestPermission + PendingIntent
-device.init()
-val blockDev = device.blockDevice   // libaums BlockDeviceDriver
+### What is verified
+
+`usb` is compiled against the **real** libaums interface. The AAR is fetched
+from Maven Central and its `classes.jar` extracted by a Gradle task, because a
+JVM module cannot consume an AAR directly. libaums' `BlockDeviceDriver` has no
+Android types in its signature, so this works and the adapter is unit-tested
+against fakes and against libaums' own `FileBlockDeviceDriver`.
+
+`UsbPathValidationTest` in `jvm-test` then drives a complete format through
+that real libaums driver and validates the result with `fsck.vfat`, at three
+sizes, and checks the geometry `fsck` derives matches what `core` planned. It
+also asserts that formatting through libaums and formatting straight to a file
+produce **byte-identical** media. The only link in the Android I/O path that is
+not covered is the USB transport itself.
+
+### What libaums actually does, versus what the brief assumed
+
+Four things had to be established from the artifact rather than assumed, and
+all four change the code:
+
+**There is no `device.blockDevice`.** `UsbMassStorageDevice` in 0.10.0 exposes
+`partitions`, not a raw block device. More importantly its `init()` parses the
+partition table and throws when it cannot — which is the normal state of the
+blank, corrupt or half-formatted stick someone reaches for this app to fix. So
+`UsbAccess` does not use that class at all: it finds the mass-storage interface
+and endpoints itself and builds `ScsiBlockDevice` directly, which does only
+INQUIRY and READ CAPACITY.
+
+**`blocks` is off by one.** `BlockDeviceDriver.blocks` is documented as "the
+block device size in blocks", and `FileBlockDeviceDriver` returns exactly that.
+`ScsiBlockDevice` instead returns the SCSI READ CAPACITY(10) *last logical block
+address*, one less. The two implementations disagree with each other and one
+disagrees with the interface. Taking it at face value loses the final sector —
+and the stale-signature wipe targets the last 33 sectors precisely because a
+backup GPT header lives in the very last one, so an off-by-one would leave
+behind the exact thing the wipe exists to remove.
+
+Hard-coding `+ 1` would be worse: it over-runs any correct driver and breaks if
+libaums is fixed. So `probeSectorCount` measures the boundary instead — read the
+sector one past the reported count, and see whether it succeeds. Reads are
+harmless, both conventions come out right, and where the result is ambiguous
+the smaller figure wins, because under-reporting costs one sector while
+over-reporting corrupts writes that fall off the end.
+
+**Addressing is per-implementation.** The interface documentation says the
+offset "can either be the amount of bytes or a logical block addressing" —
+`ScsiBlockDevice` uses blocks, `ByteBlockDevice` and `Partition` use bytes and
+are confined to one partition. Passing the wrong one would write at 1/512 of
+every intended offset and could never reach sector 0. The type is checkable, so
+`LibaumsSectorDevice.open` rejects a `ByteBlockDevice` outright.
+
+**Buffers must be plain.** Every libaums transport reaches for
+`buffer.array()`, and `UsbRequestCommunication` carries the comment "UsbRequest
+.queue always reads at position 0". A buffer with a non-zero position or array
+offset takes a different path in each implementation. The adapter therefore
+hands libaums only buffers with position 0, limit equal to the transfer length,
+and a backing array of exactly that size — the one shape all of them agree on.
+A test asserts this on every transfer.
+
+Two smaller ones: `createUsbCommunication` takes `(outEndpoint, inEndpoint)` in
+that order, and the USB permission `PendingIntent` must be `FLAG_MUTABLE` or it
+arrives with neither `EXTRA_DEVICE` nor `EXTRA_PERMISSION_GRANTED`.
+
+### Safety behaviour
+
+Everything §5.2 of the brief requires, with the decision logic in `usb` where
+it is tested rather than in a dialog's conditional:
+
+- **Identity before any write.** `UsbTarget.describe()` gives vendor, product,
+  serial, USB ID and geometry. Capacity is shown in decimal GB, deliberately:
+  a stick sold as "64GB" reports about 57 GiB, and a user asked to confirm
+  "57.3 GiB" against a label reading 64GB cannot tell whether they picked the
+  right device.
+- **Type-to-confirm above 64 GB**, from `ConfirmationPolicy`. The threshold is
+  decimal, chosen against what devices report rather than what they are sold
+  as: a nominal 64GB stick reports ~61.5 GB and stays below the line, so
+  routine boot-stick work is not buried under a ritual that trains people to
+  dismiss it unread; a 128 GB stick or an external SSD lands above it. The
+  phrase is the volume label when there is one, because typing it proves the
+  user read the options they set.
+- **Read-back verification** is already in `core` and applies unchanged.
+- **A partial `WakeLock`**, plus a foreground service of type
+  `connectedDevice`. The brief asks only for the wake lock, but a wake lock
+  does not stop Android reclaiming the process when the user switches away, and
+  a format killed mid-write leaves the same unmountable drive. The work
+  therefore does not live in the Activity at all.
+- **Real progress**, sectors written against sectors planned, with the phase
+  named. On a large stick `ZERO_FAT` is essentially the whole wait; an
+  unlabelled bar sitting at 4% for four minutes reads as a hang.
+- **Cancellation** is polled between write batches and says plainly that the
+  device is left unusable.
+- **The empty-device case** tells the user to eject the drive in Files first.
+
+`FormatPlanner` exists because `FormatOptions` validates the volume label in
+its constructor and throws. A UI that builds options in a property getter read
+during composition would turn a user typing a full stop into a crash, so every
+throwing path is funnelled through the planner and comes back as a message.
+That was a real bug in the first draft of the ViewModel, and it is now covered
+by a test.
+
+### What is *not* verified
+
+**The `:android` module has never been compiled.** This environment has no
+Android SDK and no route to Google's Maven repository, so neither the Android
+Gradle Plugin nor the platform jars can be fetched. The module is written as
+complete, review-ready source and excluded from the build until an SDK is
+present.
+
+Expect to fix ordinary build-time things on first compile — dependency
+versions, an import, a Compose signature. What has been checked statically is
+that every `core` and `usb` symbol the Android sources reference actually
+exists in the compiled jars, since API drift between the modules is the failure
+this repository can still catch.
+
+Untestable without hardware, and worth attention on a first run: the USB
+permission dialog, `forceClaim` against a drive Android has already mounted,
+foreground-service behaviour on Android 14+, and real SCSI transfer sizes.
+
+To build it:
+
+```
+export ANDROID_HOME=/path/to/android/sdk    # or set sdk.dir in local.properties
+./gradlew :android:assembleDebug
 ```
 
-The work is `LibaumsSectorDevice : SectorDevice` adapting that driver, plus the
-permission flow, device picker, options UI and progress. Do not reimplement the
-transport: `libaums` (Apache-2.0, `me.jahnen.libaums:core`) already does
-Bulk-Only Transport over the USB Host API. Use its `BlockDeviceDriver` and
-ignore everything above that layer.
-
-`core` is ready for it:
-
-- `Progress` reports a real phase and a real sector count, so the bar is never
-  indeterminate. `plannedProgressSectors` includes the verification read-back,
-  so the bar lands on exactly 100% instead of overrunning during the final
-  phase. `Phase.ZERO_FAT` is essentially the entire wait on a large stick —
-  name the phase in the UI or it will look stuck.
-- `Progress.isCancelled` is polled between write batches and aborts with
-  `FormatCancelledException`. An aborted format leaves the device unmountable;
-  say so.
-- `Formatter.plan` gives the confirmation screen its content without touching
-  the device.
-- `blockSize` is honoured throughout, so 4096-byte-sector readers work.
-
-Still to do in the app layer, from the brief:
-
-- Show vendor, product, serial and **capacity in GB** before any write.
-- Type-to-confirm for anything over 64 GB — that size is far more likely to be
-  someone's external SSD than a boot stick.
-- Hold a partial `WakeLock` for the duration.
-- Handle `getMassStorageDevices` returning empty (another app holds the
-  interface, or Android has already mounted the drive) with a message telling
-  the user to eject it in Files first.
-- Manifest: `<uses-feature android:name="android.hardware.usb.host" />`.
+`compileSdk`/`targetSdk` are 35 and should be raised for Android 17; `minSdk`
+is 26, the floor for `startForegroundService` and notification channels.
 
 ## Phase 2 — the other filesystems
 

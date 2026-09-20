@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">OTGFormat</string>
+    <string name="notification_channel_name">Formatting</string>
+    <string name="notification_channel_description">Progress while a USB device is being formatted</string>
+</resources>
