@@ -11,6 +11,7 @@ import dev.otgformat.usb.Confirmation
 import dev.otgformat.usb.ConfirmationPolicy
 import dev.otgformat.usb.FormatPlanner
 import dev.otgformat.usb.PlanOutcome
+import dev.otgformat.usb.SelfTestReport
 import dev.otgformat.usb.UsbTarget
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -41,6 +42,8 @@ data class UiState(
     val typed: String = "",
     val busy: Boolean = false,
     val message: String? = null,
+    val selfTest: SelfTestReport? = null,
+    val selfTestRunning: Boolean = false,
 ) {
     val selected: MassStorageCandidate? get() = candidates.firstOrNull { it.key == selectedKey }
 
@@ -183,6 +186,36 @@ class FormatViewModel(app: Application) : AndroidViewModel(app) {
             FormatState.Running(s.target?.displayName() ?: "device", Phase.WIPE_SIGNATURES, 0, 1),
         )
         FormatService.start(getApplication(), candidate, options)
+    }
+
+    /**
+     * Runs the read-only self-test and keeps the report for display.
+     *
+     * This exists so that checking whether a device works is one tap and a
+     * block of text that can be sent to someone else verbatim, rather than a
+     * logcat capture and a person who has to know what they are looking at.
+     */
+    fun runSelfTest() {
+        val candidate = _state.value.selected ?: return
+        _state.value = _state.value.copy(selfTestRunning = true, selfTest = null)
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) { runCatching { access.selfTest(candidate) } }
+            _state.value = result.fold(
+                onSuccess = { _state.value.copy(selfTestRunning = false, selfTest = it) },
+                onFailure = {
+                    _state.value.copy(
+                        selfTestRunning = false,
+                        message = "The self-test could not open the device: " +
+                            "${it.message ?: it.javaClass.simpleName}. If Android has the drive mounted, " +
+                            "eject it in Files first.",
+                    )
+                },
+            )
+        }
+    }
+
+    fun dismissSelfTest() {
+        _state.value = _state.value.copy(selfTest = null)
     }
 
     fun cancelFormat() = FormatController.requestCancel()

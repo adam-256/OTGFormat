@@ -41,12 +41,19 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
 import dev.otgformat.core.PartitionScheme
 import dev.otgformat.usb.Confirmation
+import dev.otgformat.usb.SelfTestReport
+import dev.otgformat.usb.UsbTarget
 
 class MainActivity : ComponentActivity() {
 
@@ -174,6 +181,24 @@ private fun SetupScreen(state: UiState, viewModel: FormatViewModel) {
                 )
             }
 
+            // ---- self-test ------------------------------------------------
+            // Offered before the options, because the useful order is "does
+            // this work at all" and only then "how should it be formatted".
+            OutlinedButton(
+                onClick = viewModel::runSelfTest,
+                enabled = !state.selfTestRunning,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(if (state.selfTestRunning) "Checking…" else "Check this device")
+            }
+            Text(
+                "Reads only. Nothing is written, so this is safe to run on a drive with data on it.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            state.selfTest?.let { report ->
+                SelfTestCard(report, target, viewModel::dismissSelfTest)
+            }
+
             // ---- options --------------------------------------------------
             HorizontalDivider()
             Text("Options", style = MaterialTheme.typography.titleMedium)
@@ -256,6 +281,64 @@ private fun SetupScreen(state: UiState, viewModel: FormatViewModel) {
             )
         }
     }
+}
+
+/**
+ * The self-test result, with one tap to send it on.
+ *
+ * The whole point is that reporting a problem should not require anyone to
+ * capture a log or know what they are looking at, so the report is complete on
+ * its own and leaves as a single block of text.
+ */
+@Composable
+private fun SelfTestCard(report: SelfTestReport, target: UsbTarget?, onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val text = remember(report, target) { fullReport(report, target) }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                report.headline,
+                style = MaterialTheme.typography.titleSmall,
+                color = if (report.passed) MaterialTheme.colorScheme.onSurface
+                else MaterialTheme.colorScheme.error,
+            )
+            Text(text, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton(onClick = {
+                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    clipboard.setPrimaryClip(ClipData.newPlainText("OTGFormat self-test", text))
+                }) { Text("Copy") }
+                OutlinedButton(onClick = {
+                    context.startActivity(
+                        Intent.createChooser(
+                            Intent(Intent.ACTION_SEND)
+                                .setType("text/plain")
+                                .putExtra(Intent.EXTRA_SUBJECT, "OTGFormat self-test")
+                                .putExtra(Intent.EXTRA_TEXT, text),
+                            "Send report",
+                        ),
+                    )
+                }) { Text("Share") }
+                TextButton(onClick = onDismiss) { Text("Hide") }
+            }
+        }
+    }
+}
+
+/** The self-test result plus the context needed to make sense of it elsewhere. */
+private fun fullReport(report: SelfTestReport, target: UsbTarget?): String = buildString {
+    appendLine("OTGFormat ${BuildConfig.VERSION_NAME}")
+    appendLine(
+        "Phone: ${Build.MANUFACTURER} ${Build.MODEL}, " +
+            "Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})",
+    )
+    appendLine()
+    target?.let {
+        appendLine(it.describe())
+        appendLine()
+    }
+    append(report.asText())
 }
 
 @Composable

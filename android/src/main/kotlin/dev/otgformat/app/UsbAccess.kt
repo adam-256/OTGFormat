@@ -14,6 +14,8 @@ import android.os.Build
 import androidx.core.content.ContextCompat
 import dev.otgformat.core.SectorDevice
 import dev.otgformat.usb.LibaumsSectorDevice
+import dev.otgformat.usb.SelfTestReport
+import dev.otgformat.usb.UsbSelfTest
 import dev.otgformat.usb.UsbTarget
 import me.jahnen.libaums.core.driver.BlockDeviceDriverFactory
 import me.jahnen.libaums.core.usb.UsbCommunication
@@ -179,6 +181,31 @@ class UsbAccess(private val context: Context) {
         } catch (e: Throwable) {
             runCatching { communication.close() }
             throw e
+        }
+    }
+
+    /**
+     * Runs the read-only self-test against [candidate].
+     *
+     * Deliberately bypasses [LibaumsSectorDevice] and drives the raw driver:
+     * the point is to find out whether the layers underneath work at all, so
+     * wrapping them first would hide the failure being looked for. Nothing is
+     * written, so this is safe to run against a drive full of data.
+     */
+    @Throws(IOException::class)
+    fun selfTest(candidate: MassStorageCandidate): SelfTestReport {
+        require(hasPermission(candidate.device)) { "USB permission has not been granted for this device" }
+        val communication = UsbCommunicationFactory.createUsbCommunication(
+            usbManager,
+            candidate.device,
+            candidate.usbInterface,
+            candidate.outEndpoint,
+            candidate.inEndpoint,
+        )
+        return try {
+            UsbSelfTest.run(BlockDeviceDriverFactory.createBlockDevice(communication, 0))
+        } finally {
+            runCatching { communication.close() }
         }
     }
 

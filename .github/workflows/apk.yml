@@ -42,8 +42,19 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      # Gradle's stack traces bury the one line that matters, and this log is
+      # read remotely. The build output is kept and the actionable lines are
+      # reprinted at the end, so a failure is legible from the tail alone.
       - name: Build the APK
-        run: ./gradlew :android:assembleDebug --console=plain --stacktrace
+        run: |
+          set -o pipefail
+          ./gradlew :android:assembleDebug --console=plain 2>&1 | tee build.log || true
+          echo
+          echo "======================= ERROR SUMMARY ======================="
+          grep -nE "^e: |^w: |error:|FAILURE:|What went wrong|Caused by:|^> " build.log \
+            | grep -v "org.gradle" | head -80 || echo "(no matching lines)"
+          echo "============================================================="
+          grep -q "BUILD SUCCESSFUL" build.log
 
       - name: Upload the APK
         if: success()

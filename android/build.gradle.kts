@@ -30,6 +30,9 @@ android {
 
     buildFeatures {
         compose = true
+        // The self-test report names the app version, so whoever reads it
+        // knows which build produced it.
+        buildConfig = true
     }
 
     compileOptions {
