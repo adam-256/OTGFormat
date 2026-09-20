@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  phase0:
+    name: Phase 0 — FAT32 verified against dosfstools
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the validation oracles
+        # dosfstools provides mkfs.vfat (the structural oracle) and fsck.vfat
+        # (the validity oracle); mtools provides an unprivileged read/write
+        # round trip. Without these the acceptance tests skip rather than fail,
+        # so they are installed explicitly here.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dosfstools mtools file
+          fsck.vfat --help 2>&1 | head -1 || true
+          mkfs.vfat --help 2>&1 | tail -1 || true
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Run the acceptance suite
+        run: ./gradlew test --console=plain
+
+      - name: Publish test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            core/build/reports/tests/test
+            jvm-test/build/reports/tests/test
