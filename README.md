@@ -215,6 +215,34 @@ the same tools.
 
 ---
 
+## Getting the app onto a phone
+
+The development container this is written in has no Android SDK and no route to
+Google's Maven repository, so the APK is built by GitHub Actions instead
+(`.github/workflows/apk.yml`). Every push builds it.
+
+1. Open the [Actions tab](https://github.com/adam-256/OTGFormat/actions) and
+   click the most recent **Android APK** run with a green tick.
+2. Download **OTGFormat-debug-apk** from the Artifacts section at the bottom.
+   It arrives as a zip; the APK is inside.
+3. Copy the APK to the phone and tap it. Android will ask permission to install
+   from this source — it is a debug build, not from the Play Store.
+
+Then, before formatting anything:
+
+- Plug the stick in through an OTG adapter and open the app.
+- Select the device and tap **Check this device**. That runs a read-only pass
+  over everything a format needs — it writes nothing, so it is safe on a drive
+  with data on it — and produces a short report with **Copy** and **Share**
+  buttons.
+
+The report names the phone, the Android version, the drive, its true capacity,
+whether the first and last sectors are reachable, whether the drive answers
+reads past its own end (a counterfeit-capacity tell), and which USB transfer
+sizes it accepts and how fast. That is deliberately the entire set of questions
+this project could not answer without hardware, packaged so that sending the
+answer is one tap rather than a logcat capture.
+
 ## Phase 1 — the Android layer
 
 Split deliberately, on the same principle as Phase 0: everything where a bug
