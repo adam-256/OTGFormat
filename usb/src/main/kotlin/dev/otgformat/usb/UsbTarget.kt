@@ -13,9 +13,22 @@ data class UsbTarget(
     val serialNumber: String?,
     val vendorId: Int,
     val productId: Int,
-    val blockSize: Int,
-    val sectorCount: Long,
+    /** Zero until the device has been claimed and its capacity read. */
+    val blockSize: Int = 0,
+    /** Zero until the device has been claimed and its capacity read. */
+    val sectorCount: Long = 0,
 ) {
+    /**
+     * Whether the capacity has actually been read from the device.
+     *
+     * Identity — vendor, product, serial, USB IDs — comes from the USB
+     * descriptors and is available without claiming the interface. Capacity
+     * needs a SCSI READ CAPACITY, which needs the claim. Keeping the two apart
+     * means the user can be shown *which* device is selected even when talking
+     * to it fails.
+     */
+    val capacityKnown: Boolean get() = sectorCount > 0 && blockSize > 0
+
     val capacityBytes: Long get() = sectorCount * blockSize
 
     /**
@@ -30,6 +43,7 @@ data class UsbTarget(
     val capacityGb: Double get() = capacityBytes / 1_000_000_000.0
 
     fun capacityLabel(): String = when {
+        !capacityKnown -> "not read yet"
         capacityBytes >= 1_000_000_000L -> String.format(java.util.Locale.ROOT, "%.1f GB", capacityGb)
         else -> String.format(java.util.Locale.ROOT, "%.0f MB", capacityBytes / 1_000_000.0)
     }
@@ -54,6 +68,9 @@ data class UsbTarget(
         appendLine("  capacity : ${capacityLabel()}")
         appendLine("  serial   : ${serialNumber?.trim()?.ifEmpty { null } ?: "(not reported)"}")
         appendLine(String.format(java.util.Locale.ROOT, "  USB ID   : %04x:%04x", vendorId, productId))
-        append("  geometry : $sectorCount sectors of $blockSize bytes")
+        append(
+            if (capacityKnown) "  geometry : $sectorCount sectors of $blockSize bytes"
+            else "  geometry : not read yet",
+        )
     }
 }

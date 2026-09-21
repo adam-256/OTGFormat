@@ -46,7 +46,9 @@ object ConfirmationPolicy {
 
     fun forTarget(target: UsbTarget, label: String?): Confirmation {
         val summary = target.describe()
-        if (target.capacityBytes <= TYPE_TO_CONFIRM_ABOVE_BYTES) {
+        // An unknown capacity cannot be formatted at all — planning needs the
+        // real geometry — so there is nothing yet to make the user confirm.
+        if (!target.capacityKnown || target.capacityBytes <= TYPE_TO_CONFIRM_ABOVE_BYTES) {
             return Confirmation.Acknowledge(summary)
         }
         // The label is the better phrase: typing it means the user has read the

@@ -6,15 +6,18 @@ import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
@@ -61,6 +64,11 @@ class MainActivity : ComponentActivity() {
     private var permissionReceiver: BroadcastReceiver? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // From Android 15 an app targeting SDK 35 is edge-to-edge whether it
+        // asks or not, so content draws underneath the status bar and the
+        // camera cutout unless the insets are applied. Declaring it here rather
+        // than inheriting it keeps the behaviour the same on older versions.
+        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
 
         permissionReceiver = UsbAccess(this).registerPermissionReceiver { _, granted ->
@@ -78,7 +86,11 @@ class MainActivity : ComponentActivity() {
         setContent {
             MaterialTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    FormatScreen(viewModel)
+                    // safeDrawingPadding keeps content clear of the status bar,
+                    // the navigation bar and the display cutout.
+                    Box(modifier = Modifier.safeDrawingPadding()) {
+                        FormatScreen(viewModel)
+                    }
                 }
             }
         }
@@ -136,26 +148,26 @@ private fun SetupScreen(state: UiState, viewModel: FormatViewModel) {
                 style = MaterialTheme.typography.bodyMedium,
             )
         } else {
-            state.candidates.forEach { candidate ->
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .selectable(
+                state.candidates.forEach { candidate ->
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .selectable(
+                                selected = candidate.key == state.selectedKey,
+                                onClick = { viewModel.select(candidate) },
+                            )
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        RadioButton(
                             selected = candidate.key == state.selectedKey,
                             onClick = { viewModel.select(candidate) },
                         )
-                        .padding(vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    RadioButton(
-                        selected = candidate.key == state.selectedKey,
-                        onClick = { viewModel.select(candidate) },
-                    )
-                    Text(
-                        candidate.device.productName
-                            ?: "USB %04x:%04x".format(candidate.device.vendorId, candidate.device.productId),
-                    )
-                }
+                        Text(
+                            candidate.device.productName
+                                ?: "USB %04x:%04x".format(candidate.device.vendorId, candidate.device.productId),
+                        )
+                    }
             }
         }
         TextButton(onClick = viewModel::refresh) { Text("Rescan") }
@@ -200,7 +212,17 @@ private fun SetupScreen(state: UiState, viewModel: FormatViewModel) {
             }
 
             // ---- options --------------------------------------------------
+            // Shown only once the drive has actually answered. Without a real
+            // capacity there is no geometry to plan and nothing to confirm
+            // against, so offering the controls would be offering a lie.
             HorizontalDivider()
+            if (!target.capacityKnown) {
+                Text(
+                    "This drive has not been read yet, so there is nothing to format. " +
+                        "Run the check above first.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            } else {
             Text("Options", style = MaterialTheme.typography.titleMedium)
 
             Dropdown("Filesystem", "FAT32", listOf("FAT32")) { }
@@ -279,6 +301,7 @@ private fun SetupScreen(state: UiState, viewModel: FormatViewModel) {
                 "Everything on the device will be destroyed.",
                 style = MaterialTheme.typography.bodySmall,
             )
+            }
         }
     }
 }

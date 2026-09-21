@@ -85,9 +85,18 @@ class FormatViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun select(candidate: MassStorageCandidate) {
-        _state.value = _state.value.copy(selectedKey = candidate.key, message = null)
+        // Identity comes from the USB descriptors and needs no claim, so the
+        // user can see which device is selected immediately — and still see it
+        // if talking to the drive fails.
+        _state.value = _state.value.copy(
+            selectedKey = candidate.key,
+            message = null,
+            selfTest = null,
+            target = access.identify(candidate),
+            outcome = null,
+        )
         if (!access.hasPermission(candidate.device)) {
-            _state.value = _state.value.copy(needsPermission = true, target = null, outcome = null)
+            _state.value = _state.value.copy(needsPermission = true)
             access.requestPermission(candidate.device)
             return
         }
@@ -199,9 +208,13 @@ class FormatViewModel(app: Application) : AndroidViewModel(app) {
         val candidate = _state.value.selected ?: return
         _state.value = _state.value.copy(selfTestRunning = true, selfTest = null)
         viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) { runCatching { access.selfTest(candidate) } }
+            val result = withContext(Dispatchers.IO) { runCatching { access.diagnose(candidate) } }
             _state.value = result.fold(
-                onSuccess = { _state.value.copy(selfTestRunning = false, selfTest = it) },
+                onSuccess = { report ->
+                    // A self-test that got through to the SCSI layer also
+                    // learned the capacity, so the plan can be filled in.
+                    _state.value.copy(selfTestRunning = false, selfTest = report)
+                },
                 onFailure = {
                     _state.value.copy(
                         selfTestRunning = false,
