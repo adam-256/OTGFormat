@@ -47,22 +47,42 @@ internal class DirectUsbCommunication(
      * forever on any short read.
      */
     override fun bulkOutTransfer(src: ByteBuffer): Int {
-        check(!closed) { "device is closed" }
-        val moved = connection.bulkTransfer(
-            outEndpoint, src.array(), src.position(), src.remaining(), TIMEOUT,
-        )
-        if (moved < 0) throw IOException("bulk write to endpoint 0x%02x failed".format(outEndpoint.address))
+        val moved = transfer(outEndpoint, src, "write")
         src.position(src.position() + moved)
         return moved
     }
 
     override fun bulkInTransfer(dest: ByteBuffer): Int {
-        check(!closed) { "device is closed" }
-        val moved = connection.bulkTransfer(
-            inEndpoint, dest.array(), dest.position(), dest.remaining(), TIMEOUT,
-        )
-        if (moved < 0) throw IOException("bulk read from endpoint 0x%02x failed".format(inEndpoint.address))
+        val moved = transfer(inEndpoint, dest, "read")
         dest.position(dest.position() + moved)
+        return moved
+    }
+
+    /**
+     * One bulk transfer, clearing a stalled endpoint and trying once more.
+     *
+     * A drive stalls its bulk endpoint when it dislikes a command — an
+     * out-of-range read being the obvious way to provoke it — and the stall
+     * persists until CLEAR_FEATURE(ENDPOINT_HALT). Without this, one bad
+     * command leaves every later transfer failing, and the session has to be
+     * torn down to recover. libaums has its own recovery for this, but it fires
+     * only on an EPIPE it detects through a native helper that does not load on
+     * recent Pixels, so it never runs there.
+     */
+    private fun transfer(endpoint: UsbEndpoint, buffer: ByteBuffer, what: String): Int {
+        check(!closed) { "device is closed" }
+        var moved = connection.bulkTransfer(
+            endpoint, buffer.array(), buffer.position(), buffer.remaining(), TIMEOUT,
+        )
+        if (moved < 0) {
+            runCatching { clearFeatureHalt(endpoint) }
+            moved = connection.bulkTransfer(
+                endpoint, buffer.array(), buffer.position(), buffer.remaining(), TIMEOUT,
+            )
+        }
+        if (moved < 0) {
+            throw IOException("bulk $what on endpoint 0x%02x failed".format(endpoint.address))
+        }
         return moved
     }
 

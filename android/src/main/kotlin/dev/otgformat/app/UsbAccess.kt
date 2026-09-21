@@ -209,7 +209,11 @@ class UsbAccess(private val context: Context) {
     }
 
     /** A successfully opened device, keeping the raw driver for the self-test. */
-    private class Opened(val target: OpenTarget, val driver: BlockDeviceDriver)
+    private class Opened(
+        val target: OpenTarget,
+        val driver: BlockDeviceDriver,
+        val communication: UsbCommunication,
+    )
 
     private fun openVia(
         candidate: MassStorageCandidate,
@@ -228,7 +232,7 @@ class UsbAccess(private val context: Context) {
                 sectorDevice,
                 communication,
             )
-            return Opened(target, driver)
+            return Opened(target, driver, communication)
         } catch (t: Throwable) {
             runCatching { communication.close() }
             throw t
@@ -372,7 +376,13 @@ class UsbAccess(private val context: Context) {
         return try {
             // The SCSI layer is already initialised by the successful open, so
             // the checks run against the raw driver without a second INQUIRY.
-            val scsi = UsbSelfTest.run(opened.driver, initialise = false)
+            // The past-end check deliberately stalls the endpoint, so the
+            // device is handed a reset afterwards rather than left wedged.
+            val scsi = UsbSelfTest.run(
+                opened.driver,
+                initialise = false,
+                recover = { runCatching { opened.communication.resetDevice() } },
+            )
             if (workingRung != ladder.first().label) {
                 notes += "Note: this drive only came up on \"$workingRung\". The app will do the same thing " +
                     "automatically when formatting."

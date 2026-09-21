@@ -4,20 +4,6 @@ import me.jahnen.libaums.core.driver.BlockDeviceDriver
 import java.io.IOException
 import java.nio.ByteBuffer
 
-/**
- * How a driver reports its size.
- *
- * libaums' two shipped implementations disagree, so both are modelled and the
- * adapter is expected to cope with either.
- */
-enum class CapacityConvention {
-    /** `blocks` is the number of blocks, as `FileBlockDeviceDriver` reports. */
-    BLOCK_COUNT,
-
-    /** `blocks` is the last valid address, as `ScsiBlockDevice` reports. */
-    LAST_BLOCK_ADDRESS,
-}
-
 /** One transfer libaums was asked to perform, recorded for assertions. */
 data class Transfer(
     val write: Boolean,
@@ -40,10 +26,16 @@ data class Transfer(
 class FakeBlockDeviceDriver(
     val trueSectorCount: Long,
     override val blockSize: Int = 512,
-    private val convention: CapacityConvention = CapacityConvention.LAST_BLOCK_ADDRESS,
+    // BLOCK_COUNT matches what LibaumsSectorDevice.conventionOf reports for
+    // anything that is not a ScsiBlockDevice, so the fake does not contradict
+    // the rule under test. Tests that want the other convention pass it.
+    private val convention: CapacityConvention = CapacityConvention.BLOCK_COUNT,
     /** Reports a capacity but accepts reads beyond it, like a lying device. */
     private val unboundedReads: Boolean = false,
 ) : BlockDeviceDriver {
+
+    /** Reads at or above this sector fail, as a drive near its end might. */
+    var failReadsFrom: Long = Long.MAX_VALUE
 
     val store = ByteArray((trueSectorCount * blockSize).toInt())
     val transfers = mutableListOf<Transfer>()
@@ -61,6 +53,7 @@ class FakeBlockDeviceDriver(
 
     override fun read(deviceOffset: Long, buffer: ByteBuffer) {
         val length = record(write = false, lba = deviceOffset, buffer = buffer)
+        if (deviceOffset >= failReadsFrom) throw IOException("read at $deviceOffset refused")
         val from = (deviceOffset * blockSize).toInt()
         if (unboundedReads && deviceOffset + length / blockSize > trueSectorCount) {
             buffer.put(ByteArray(length))

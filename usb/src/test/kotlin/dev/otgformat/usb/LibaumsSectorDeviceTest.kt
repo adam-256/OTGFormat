@@ -57,53 +57,78 @@ class LibaumsSectorDeviceTest {
     // ---- capacity ---------------------------------------------------------
 
     @Test
-    fun `a driver reporting the last block address yields the true sector count`() {
+    fun `a last-block-address driver yields the true sector count`() {
         // ScsiBlockDevice's convention. Taking `blocks` at face value would
         // lose the final sector — the one a backup GPT header sits in.
         val fake = FakeBlockDeviceDriver(trueSectorCount = 1000, convention = CapacityConvention.LAST_BLOCK_ADDRESS)
         assertEquals(999L, fake.blocks, "precondition: the fake reports a last address")
-        assertEquals(1000L, LibaumsSectorDevice.open(fake).sectorCount)
+        assertEquals(
+            1000L,
+            LibaumsSectorDevice.determineSectorCount(fake, 512, CapacityConvention.LAST_BLOCK_ADDRESS),
+        )
     }
 
     @Test
-    fun `a driver reporting a block count yields the same count`() {
+    fun `a block-count driver yields the same count`() {
         // FileBlockDeviceDriver's convention. A hard-coded +1 would over-run
         // this device by a sector.
         val fake = FakeBlockDeviceDriver(trueSectorCount = 1000, convention = CapacityConvention.BLOCK_COUNT)
         assertEquals(1000L, fake.blocks)
-        assertEquals(1000L, LibaumsSectorDevice.open(fake).sectorCount)
+        assertEquals(1000L, LibaumsSectorDevice.determineSectorCount(fake, 512, CapacityConvention.BLOCK_COUNT))
+    }
+
+    @Test
+    fun `determining the capacity never addresses a sector past the end`() {
+        // This is the bug that broke the first run on real hardware: the old
+        // implementation read one sector *past* the reported count to work out
+        // the convention. A drive answers that by stalling its bulk endpoint,
+        // and every transfer afterwards fails until the halt is cleared.
+        for (convention in CapacityConvention.entries) {
+            val fake = FakeBlockDeviceDriver(trueSectorCount = 1000, convention = convention)
+            val count = LibaumsSectorDevice.determineSectorCount(fake, 512, convention)
+            val highest = fake.transfers.maxOf { it.lba + it.bytes / 512 }
+            assertTrue(
+                highest <= count,
+                "$convention: addressed up to sector $highest on a device of $count sectors",
+            )
+            assertTrue(fake.transfers.none { it.write }, "$convention: determining capacity must not write")
+        }
+    }
+
+    @Test
+    fun `a driver whose last sector cannot be read falls back to the smaller count`() {
+        // Under-reporting costs one sector; over-reporting corrupts writes that
+        // fall off the end, so the smaller figure wins.
+        val fake = FakeBlockDeviceDriver(
+            trueSectorCount = 1000,
+            convention = CapacityConvention.LAST_BLOCK_ADDRESS,
+        )
+        assertEquals(999L, fake.blocks, "precondition: reports a last address")
+        fake.failReadsFrom = 999
+        assertEquals(999L, LibaumsSectorDevice.determineSectorCount(fake, 512, CapacityConvention.LAST_BLOCK_ADDRESS))
     }
 
     @Test
     fun `the last sector of the device is writable under either convention`() {
         for (convention in CapacityConvention.entries) {
             val fake = FakeBlockDeviceDriver(trueSectorCount = 1000, convention = convention)
-            val device = LibaumsSectorDevice.open(fake)
+            val count = LibaumsSectorDevice.determineSectorCount(fake, 512, convention)
+            val device = LibaumsSectorDevice(fake, 512, count, 32)
             val payload = ByteArray(512) { 0x7E }
-            // Would throw if sectorCount were wrong in either direction.
+            // Would throw if the count were wrong in either direction.
             device.write(device.sectorCount - 1, payload)
-            assertContentEquals(payload, fake.sector(999), "$convention")
+            assertContentEquals(payload, fake.sector(count - 1), "$convention")
         }
     }
 
     @Test
-    fun `a device that accepts reads past its own end is trusted only as far as it reports`() {
-        // If probing cannot find a boundary the device is not reporting
-        // honestly. Under-reporting costs one sector; over-reporting corrupts
-        // writes that fall off the end, so the smaller figure wins.
-        val fake = FakeBlockDeviceDriver(
-            trueSectorCount = 1000,
-            convention = CapacityConvention.LAST_BLOCK_ADDRESS,
-            unboundedReads = true,
+    fun `an unknown driver is assumed to report a block count`() {
+        // The libaums interface documents `blocks` as a count, and only
+        // ScsiBlockDevice departs from that.
+        assertEquals(
+            CapacityConvention.BLOCK_COUNT,
+            LibaumsSectorDevice.conventionOf(FakeBlockDeviceDriver(trueSectorCount = 10)),
         )
-        assertEquals(999L, LibaumsSectorDevice.open(fake).sectorCount)
-    }
-
-    @Test
-    fun `the capacity probe only ever reads`() {
-        val fake = FakeBlockDeviceDriver(trueSectorCount = 1000)
-        LibaumsSectorDevice.open(fake)
-        assertTrue(fake.transfers.none { it.write }, "probing must never write to a device it has not been told to")
     }
 
     @Test
@@ -152,7 +177,8 @@ class LibaumsSectorDeviceTest {
         device.write(1000, oneMiB)
 
         val writes = fake.transfers.filter { it.write }
-        assertEquals(8, writes.size, "1 MiB should split into eight 128 KiB commands")
+        val expected = (1 shl 20) / LibaumsSectorDevice.DEFAULT_MAX_TRANSFER_BYTES
+        assertEquals(expected, writes.size, "1 MiB should split into $expected commands")
         writes.forEach { assertTrue(it.bytes <= LibaumsSectorDevice.DEFAULT_MAX_TRANSFER_BYTES) }
 
         // Chunks must be consecutive and cover the range exactly once.
@@ -227,12 +253,34 @@ class LibaumsSectorDeviceTest {
         val reference = ArraySectorDevice(sectors, 512)
         Formatter.format(reference, options)
 
-        assertContentEquals(
+        assertSameBytes(
             reference.store,
             fake.store,
             "the adapter must be transparent: formatting through libaums and formatting a plain " +
                 "array must produce identical media",
         )
+    }
+}
+
+/**
+ * Compares two whole-volume images.
+ *
+ * `assertContentEquals` renders both arrays into its failure message, which on
+ * a 64 MiB image exhausts the heap before it can tell you anything. This
+ * reports the first offset that differs instead.
+ */
+private fun assertSameBytes(expected: ByteArray, actual: ByteArray, message: String) {
+    assertEquals(expected.size, actual.size, "$message (different sizes)")
+    for (i in expected.indices) {
+        if (expected[i] != actual[i]) {
+            val from = maxOf(0, i - 8)
+            fun hex(a: ByteArray) = a.copyOfRange(from, minOf(a.size, i + 8))
+                .joinToString(" ") { "%02x".format(it) }
+            kotlin.test.fail(
+                "$message\nFirst difference at byte $i (sector ${i / 512}, offset ${i % 512}):\n" +
+                    "  expected ${hex(expected)}\n  actual   ${hex(actual)}",
+            )
+        }
     }
 }
 

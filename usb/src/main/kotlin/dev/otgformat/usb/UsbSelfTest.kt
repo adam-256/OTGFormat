@@ -52,7 +52,17 @@ object UsbSelfTest {
     /** Transfer sizes to probe, in bytes. The default chunk is in the middle. */
     val PROBE_SIZES = listOf(32 * 1024, 64 * 1024, 128 * 1024, 256 * 1024, 512 * 1024, 1024 * 1024)
 
-    fun run(driver: BlockDeviceDriver, initialise: Boolean = true): SelfTestReport {
+    /**
+     * @param recover called after the deliberately out-of-range read, to put
+     *   the device back in a usable state. An out-of-range read makes a drive
+     *   stall its bulk endpoint, and a stalled endpoint stays stalled until the
+     *   halt is cleared, so this check runs last and hands back a clean device.
+     */
+    fun run(
+        driver: BlockDeviceDriver,
+        initialise: Boolean = true,
+        recover: () -> Unit = {},
+    ): SelfTestReport {
         val steps = mutableListOf<SelfTestStep>()
         val notes = mutableListOf<String>()
 
@@ -79,15 +89,19 @@ object UsbSelfTest {
         val reported = runCatching { driver.blocks }.getOrDefault(-1L)
 
         // --- capacity, and which convention this driver uses -----------------
-        val probed = runCatching { LibaumsSectorDevice.probeSectorCount(driver, blockSize) }
+        val convention = LibaumsSectorDevice.conventionOf(driver)
+        val probed = runCatching { LibaumsSectorDevice.determineSectorCount(driver, blockSize, convention) }
         val sectorCount = probed.getOrDefault(-1L)
         steps += SelfTestStep(
             "Capacity",
             sectorCount > 0,
             if (sectorCount <= 0) "could not be determined"
             else "$sectorCount sectors, ${formatGb(sectorCount * blockSize)} " +
-                "(driver reported $reported, so it counts " +
-                (if (sectorCount == reported + 1) "from the last address" else "in whole blocks") + ")",
+                "(driver reported $reported as " +
+                when (convention) {
+                    CapacityConvention.LAST_BLOCK_ADDRESS -> "the last block address"
+                    CapacityConvention.BLOCK_COUNT -> "a block count"
+                } + ")",
         )
         if (sectorCount <= 0) return SelfTestReport(steps, notes)
 
@@ -107,20 +121,6 @@ object UsbSelfTest {
             // format, so it is checked explicitly rather than assumed.
             last.fold({ "sector ${sectorCount - 1} read" }, { "failed: ${it.describe()}" }),
         )
-
-        val pastEnd = readSector(driver, sectorCount, blockSize)
-        steps += SelfTestStep(
-            "Refuses reads past the end",
-            pastEnd.isFailure,
-            if (pastEnd.isFailure) "as expected"
-            else "the device accepted a read past its own capacity, which means it is not " +
-                "reporting its size honestly",
-        )
-        if (pastEnd.isSuccess) {
-            notes += "Warning: this device answers reads beyond the capacity it reports. That is a " +
-                "hallmark of counterfeit flash. Formatting will still verify what it writes, but do " +
-                "not trust this device with anything important."
-        }
 
         // --- what the bridge will actually carry ------------------------------
         val accepted = mutableListOf<String>()
@@ -153,8 +153,27 @@ object UsbSelfTest {
         if (bestSize > 0) {
             notes += "Fastest transfer size was ${bestSize / 1024} KiB " +
                 String.format(Locale.ROOT, "at %.1f MB/s.", bestRate) +
-                " The app currently uses ${LibaumsSectorDevice.DEFAULT_MAX_TRANSFER_BYTES / 1024} KiB."
+                " The app formats with ${LibaumsSectorDevice.DEFAULT_MAX_TRANSFER_BYTES / 1024} KiB."
         }
+
+        // --- last, because it deliberately upsets the device -----------------
+        // A drive answers an out-of-range read by stalling its bulk endpoint,
+        // and everything after that fails until the halt is cleared. So this
+        // runs after every other check, and the device is put back afterwards.
+        val pastEnd = readSector(driver, sectorCount, blockSize)
+        steps += SelfTestStep(
+            "Refuses reads past the end",
+            pastEnd.isFailure,
+            if (pastEnd.isFailure) "as expected"
+            else "the device accepted a read past its own capacity, which means it is not " +
+                "reporting its size honestly",
+        )
+        if (pastEnd.isSuccess) {
+            notes += "Warning: this device answers reads beyond the capacity it reports. That is a " +
+                "hallmark of counterfeit flash. Formatting will still verify what it writes, but do " +
+                "not trust this device with anything important."
+        }
+        runCatching { recover() }
 
         return SelfTestReport(steps, notes)
     }

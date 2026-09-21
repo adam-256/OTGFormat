@@ -28,16 +28,12 @@ class UsbSelfTestTest {
     }
 
     @Test
-    fun `it reports which capacity convention the driver uses`() {
-        val lastAddress = report(
-            FakeBlockDeviceDriver(trueSectorCount = 8192, convention = CapacityConvention.LAST_BLOCK_ADDRESS),
-        ).asText()
-        assertTrue("from the last address" in lastAddress, lastAddress)
-
-        val count = report(
-            FakeBlockDeviceDriver(trueSectorCount = 8192, convention = CapacityConvention.BLOCK_COUNT),
-        ).asText()
-        assertTrue("in whole blocks" in count, count)
+    fun `it reports which capacity convention was applied`() {
+        // The convention follows the driver's type, so any stand-in is read as
+        // a block count; only ScsiBlockDevice reports a last address, and that
+        // needs Android to instantiate.
+        val text = report(FakeBlockDeviceDriver(trueSectorCount = 8192)).asText()
+        assertTrue("as a block count" in text, text)
     }
 
     @Test

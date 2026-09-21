@@ -3,6 +3,7 @@ package dev.otgformat.usb
 import dev.otgformat.core.SectorDevice
 import me.jahnen.libaums.core.driver.BlockDeviceDriver
 import me.jahnen.libaums.core.driver.ByteBlockDevice
+import me.jahnen.libaums.core.driver.scsi.ScsiBlockDevice
 import java.io.IOException
 import java.nio.ByteBuffer
 
@@ -35,8 +36,16 @@ class LibaumsSectorDevice internal constructor(
     override val blockSize: Int,
     override val sectorCount: Long,
     /** Sectors per SCSI command. See [DEFAULT_MAX_TRANSFER_BYTES]. */
-    private val maxTransferSectors: Int,
+    maxTransferSectors: Int,
 ) : SectorDevice {
+
+    /**
+     * Sectors per command, reduced on the fly if the bridge refuses a size.
+     *
+     * Exposed so the self-test can report what the drive settled on.
+     */
+    var transferSectors: Int = maxTransferSectors
+        private set
 
     /**
      * Scratch buffer handed to libaums.
@@ -81,9 +90,19 @@ class LibaumsSectorDevice internal constructor(
         val totalSectors = totalBytes / blockSize
         var done = 0
         while (done < totalSectors) {
-            val n = minOf(maxTransferSectors, totalSectors - done)
-            transfer(startSector + done, done * blockSize, n * blockSize)
-            done += n
+            val n = minOf(transferSectors, totalSectors - done)
+            try {
+                transfer(startSector + done, done * blockSize, n * blockSize)
+                done += n
+            } catch (e: Exception) {
+                // Bridges disagree about how much they will carry in one
+                // command, and the limit is not discoverable in advance. Rather
+                // than failing a format outright, step the size down and try
+                // the same chunk again; once it sticks, the smaller size is
+                // kept for the rest of the run.
+                if (n <= 1 || transferSectors <= 1) throw e
+                transferSectors = maxOf(1, transferSectors / 2)
+            }
         }
     }
 
@@ -120,12 +139,13 @@ class LibaumsSectorDevice internal constructor(
         /**
          * Bytes per SCSI command.
          *
-         * 128 KiB is comfortably within what USB mass-storage bridges accept;
-         * larger transfers are where flaky enclosures start returning short
-         * reads. Raising it is a measurable win only on fast sticks, so the
-         * conservative value is the default.
+         * 16 KiB is what `UsbDeviceConnection.bulkTransfer` documents as its
+         * supported maximum; larger transfers work on some devices and fail on
+         * others, and a formatter is the wrong place to gamble. [write] halves
+         * this on the fly if even that proves too much, so the figure is a
+         * starting point rather than a promise.
          */
-        const val DEFAULT_MAX_TRANSFER_BYTES = 128 * 1024
+        const val DEFAULT_MAX_TRANSFER_BYTES = 16 * 1024
 
         /** READ(10) and WRITE(10) address blocks with 32 unsigned bits. */
         const val MAX_ADDRESSABLE_SECTOR = 0xFFFF_FFFFL
@@ -164,7 +184,7 @@ class LibaumsSectorDevice internal constructor(
                 "device reports a $blockSize byte block size, which is not a power of two at least 512"
             }
 
-            val sectorCount = probeSectorCount(driver, blockSize)
+            val sectorCount = determineSectorCount(driver, blockSize)
             if (sectorCount <= 0) {
                 throw IOException("Device reports no capacity ($sectorCount sectors); it may not be ready.")
             }
@@ -178,38 +198,63 @@ class LibaumsSectorDevice internal constructor(
          *
          * `BlockDeviceDriver.blocks` is documented as "the block device size in
          * blocks", and `FileBlockDeviceDriver` returns exactly that
-         * (`length / blockSize`). But `ScsiBlockDevice` returns the SCSI READ
-         * CAPACITY(10) *last logical block address*, which is one less than the
-         * count — the two implementations disagree with each other and one of
-         * them disagrees with the interface.
+         * (`length / blockSize`). `ScsiBlockDevice` instead returns the SCSI
+         * READ CAPACITY(10) *last logical block address*, which is one less
+         * than the count. The two implementations disagree with each other and
+         * one disagrees with the interface.
          *
          * Taking `blocks` at face value loses the final sector. That is not
-         * cosmetic here: the stale-signature wipe targets the last 33 sectors
-         * precisely because a backup GPT header lives in the very last one, so
-         * an off-by-one would leave behind the exact thing the wipe exists to
-         * remove.
+         * cosmetic: the stale-signature wipe targets the last 33 sectors
+         * precisely because a backup GPT header lives in the very last one.
          *
-         * Hard-coding a `+ 1` would be worse — it silently over-runs the device
-         * on any driver that reports correctly, and breaks if libaums is ever
-         * fixed. So the boundary is measured instead: read the sector one past
-         * the reported count. If that succeeds the report was a last address;
-         * if it fails the report was a count. Reads are harmless either way,
-         * and where the result is ambiguous the smaller number wins, because
-         * under-reporting costs one sector and over-reporting corrupts writes
-         * that fall off the end.
+         * An earlier version of this settled the question by reading one sector
+         * *past* the reported count and seeing whether it succeeded. On real
+         * hardware that is actively harmful. A drive answers an out-of-range
+         * read by stalling the bulk endpoint, and a stalled endpoint stays
+         * stalled until CLEAR_FEATURE(ENDPOINT_HALT) — so every later transfer
+         * fails too. The probe worked on a file-backed fake and broke the
+         * device on a real one.
+         *
+         * So the convention is taken from the driver type, which is knowable,
+         * and checked by reading the last sector the answer implies. That read
+         * is inside the medium and cannot stall. Verification only ever looks
+         * downwards; nothing here addresses a sector it does not believe
+         * exists.
          */
-        internal fun probeSectorCount(driver: BlockDeviceDriver, blockSize: Int): Long {
+        fun determineSectorCount(
+            driver: BlockDeviceDriver,
+            blockSize: Int,
+            convention: CapacityConvention = conventionOf(driver),
+        ): Long {
             val reported = driver.blocks
             if (reported <= 0) return reported
 
-            val onePast = readable(driver, reported, blockSize)
-            if (!onePast) return reported          // a true count
+            val count = when (convention) {
+                CapacityConvention.LAST_BLOCK_ADDRESS -> reported + 1
+                CapacityConvention.BLOCK_COUNT -> reported
+            }
 
-            val twoPast = readable(driver, reported + 1, blockSize)
-            // Reading past the end should fail. If it does not, the device is
-            // not reporting its boundary honestly; trust the smaller figure.
-            return if (twoPast) reported else reported + 1
+            // The last sector of a correct answer must be readable.
+            if (readable(driver, count - 1, blockSize)) return count
+
+            // It was not, so fall back to the smaller reading of the same
+            // number. Under-reporting costs one sector; over-reporting corrupts
+            // writes that fall off the end.
+            return minOf(reported, count - 1).coerceAtLeast(0)
         }
+
+        /**
+         * Which meaning a driver gives to `blocks`.
+         *
+         * `ScsiBlockDevice` assigns it the READ CAPACITY(10) last block
+         * address; every other implementation in libaums, and the interface's
+         * own documentation, mean a count. Pinning the libaums version is what
+         * makes this safe to decide by type — see the dependency in
+         * `usb/build.gradle.kts`.
+         */
+        fun conventionOf(driver: BlockDeviceDriver): CapacityConvention =
+            if (driver is ScsiBlockDevice) CapacityConvention.LAST_BLOCK_ADDRESS
+            else CapacityConvention.BLOCK_COUNT
 
         private fun readable(driver: BlockDeviceDriver, sector: Long, blockSize: Int): Boolean = try {
             driver.read(sector, ByteBuffer.wrap(ByteArray(blockSize)))
