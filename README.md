@@ -3,15 +3,16 @@
 An Android app that formats USB mass-storage devices over OTG, without root,
 with full control of filesystem, cluster size, label, and partition table.
 
-**Current state: Phase 0 complete and verified. Phase 1 written, with its
-risky half verified and its UI not yet compiled** — see
-[Phase 1](#phase-1--the-android-layer) for exactly which is which.
+**Current state: Phase 0 and Phase 1 complete. The APK builds and is
+downloadable; everything except the USB transport itself is verified against
+independent tools.** See [Phase 1](#phase-1--the-android-layer) for exactly
+what is proven and what still needs a real drive.
 
 ```
 ./gradlew test
 ```
 
-111 tests. On a machine with `dosfstools`, `mtools` and `file` installed, that
+118 tests. On a machine with `dosfstools`, `mtools` and `file` installed, that
 formats images at 64 MiB, 2 GiB, 8 GiB and 64 GiB, validates every one with
 `fsck.vfat`, diffs each boot sector field-by-field against `mkfs.vfat` and
 prints the table, round-trips real files through each volume, and drives the
@@ -50,7 +51,7 @@ immediately rather than silently corrupting a drive.
 | `core` | `SectorDevice`, `Mbr`, `Fat32Layout`, `Fat32Formatter`, `Formatter` | yes | yes |
 | `usb` | `LibaumsSectorDevice`, `FormatPlanner`, `ConfirmationPolicy`, `UsbTarget` | yes | yes |
 | `jvm-test` | `FileSectorDevice`, the oracle bridge, the acceptance suite | yes | — |
-| `android` | permissions, foreground service, one-screen UI | no | **not compiled here** |
+| `android` | permissions, foreground service, one-screen UI | no | compiles in CI; untested on hardware |
 
 The dependency arrow points one way: `android` → `usb` → `core` → nothing.
 `core` and `usb` have zero Android imports and must keep it that way. That is
@@ -360,23 +361,25 @@ by a test.
 
 ### What is *not* verified
 
-**The `:android` module has never been compiled.** This environment has no
-Android SDK and no route to Google's Maven repository, so neither the Android
-Gradle Plugin nor the platform jars can be fetched. The module is written as
-complete, review-ready source and excluded from the build until an SDK is
-present.
+The `:android` module cannot be compiled in the container this was written in —
+no Android SDK, and `dl.google.com` is refused by the egress policy — so it is
+built by GitHub Actions instead and the APK is published to the `latest-debug`
+release. It compiles clean and the shipped APK has been checked to contain the
+manifest entries, the compiled `device_filter.xml` and every `core`/`usb` class
+it should.
 
-Expect to fix ordinary build-time things on first compile — dependency
-versions, an import, a Compose signature. What has been checked statically is
-that every `core` and `usb` symbol the Android sources reference actually
-exists in the compiled jars, since API drift between the modules is the failure
-this repository can still catch.
+Compiling is not running, though. These need a real drive and are what the
+self-test measures:
 
-Untestable without hardware, and worth attention on a first run: the USB
-permission dialog, `forceClaim` against a drive Android has already mounted,
-foreground-service behaviour on Android 14+, and real SCSI transfer sizes.
+- whether `forceClaim` takes the interface when Android has already mounted the
+  drive
+- whether the USB permission dialog returns with `EXTRA_DEVICE` populated —
+  the `FLAG_MUTABLE` path
+- what transfer sizes the bridge actually accepts, and whether 128 KiB is the
+  right default
+- foreground-service behaviour on recent Android
 
-To build it:
+To build it locally instead:
 
 ```
 export ANDROID_HOME=/path/to/android/sdk    # or set sdk.dir in local.properties
