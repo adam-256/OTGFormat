@@ -217,31 +217,39 @@ the same tools.
 
 ## Getting the app onto a phone
 
-The development container this is written in has no Android SDK and no route to
-Google's Maven repository, so the APK is built by GitHub Actions instead
-(`.github/workflows/apk.yml`). Every push builds it.
+**[Download the APK](https://github.com/adam-256/OTGFormat/releases/download/latest-debug/OTGFormat-debug.apk)**
 
-1. Open the [Actions tab](https://github.com/adam-256/OTGFormat/actions) and
-   click the most recent **Android APK** run with a green tick.
-2. Download **OTGFormat-debug-apk** from the Artifacts section at the bottom.
-   It arrives as a zip; the APK is inside.
-3. Copy the APK to the phone and tap it. Android will ask permission to install
-   from this source — it is a debug build, not from the Play Store.
+Open that on the phone and tap the downloaded file. Android will ask permission
+to install from this source, because it is a debug build rather than a Play
+Store release. The link always points at the newest build.
 
-Then, before formatting anything:
+The development container this project is written in has no Android SDK and no
+route to Google's Maven repository, so the APK is built by GitHub Actions
+(`.github/workflows/apk.yml`) and published to the `latest-debug` release on
+every push.
 
-- Plug the stick in through an OTG adapter and open the app.
-- Select the device and tap **Check this device**. That runs a read-only pass
-  over everything a format needs — it writes nothing, so it is safe on a drive
-  with data on it — and produces a short report with **Copy** and **Share**
-  buttons.
+### Check the drive before formatting it
 
-The report names the phone, the Android version, the drive, its true capacity,
-whether the first and last sectors are reachable, whether the drive answers
-reads past its own end (a counterfeit-capacity tell), and which USB transfer
-sizes it accepts and how fast. That is deliberately the entire set of questions
-this project could not answer without hardware, packaged so that sending the
-answer is one tap rather than a logcat capture.
+Plug the drive in through an OTG adapter, open the app, select the device, and
+tap **Check this device**.
+
+That runs a read-only pass over everything a format depends on. It writes
+nothing, so it is safe on a drive with data on it. It ends in a short report
+with **Copy** and **Share** buttons.
+
+The report covers exactly the questions this project could not answer without
+hardware:
+
+- whether the drive can be claimed and answers SCSI at all
+- its sector size and true capacity, and which capacity convention the driver
+  used to report it
+- whether the first and last sectors are reachable — the last one matters,
+  because that is where a stale backup GPT header hides
+- whether the drive answers reads *past* its own stated end, which is the
+  signature of counterfeit-capacity flash
+- which USB transfer sizes the bridge accepts, and how fast each one is
+
+Sending it back is one tap. There is no log to capture and nothing to interpret.
 
 ## Phase 1 — the Android layer
 

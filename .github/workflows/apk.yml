@@ -18,6 +18,10 @@ jobs:
     name: Build debug APK
     runs-on: ubuntu-latest
 
+    # Needed to publish the APK as a release asset.
+    permissions:
+      contents: write
+
     steps:
       - uses: actions/checkout@v4
 
@@ -56,10 +60,39 @@ jobs:
           echo "============================================================="
           grep -q "BUILD SUCCESSFUL" build.log
 
-      - name: Upload the APK
+      - name: Upload the APK as a build artifact
         if: success()
         uses: actions/upload-artifact@v4
         with:
           name: OTGFormat-debug-apk
           path: android/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+
+      # An Actions artifact downloads as a zip and requires a GitHub login,
+      # which is awkward on the phone that is meant to install it. A release
+      # asset on a public repository is a direct link to the .apk itself, so
+      # installing it is: open link, tap file. The tag is reused, so the link
+      # never changes.
+      - name: Publish the APK where a phone can download it
+        if: success() && github.ref_name == github.event.repository.default_branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          APK=$(find android/build/outputs/apk/debug -name "*.apk" | head -1)
+          cp "$APK" OTGFormat-debug.apk
+          NOTES="Debug build of ${GITHUB_SHA::7}.
+
+          Install: download the .apk below and tap it. Android will ask
+          permission to install from this source, because it is a debug build
+          rather than a Play Store release.
+
+          Before formatting anything, plug in the drive, select it, and tap
+          **Check this device**. That is read-only — it writes nothing — and
+          produces a short report with Copy and Share buttons."
+          gh release create latest-debug \
+            --title "OTGFormat (latest debug build)" \
+            --notes "$NOTES" \
+            --prerelease 2>/dev/null || gh release edit latest-debug --notes "$NOTES"
+          gh release upload latest-debug OTGFormat-debug.apk --clobber
+          echo "Installable APK: https://github.com/${GITHUB_REPOSITORY}/releases/download/latest-debug/OTGFormat-debug.apk"
