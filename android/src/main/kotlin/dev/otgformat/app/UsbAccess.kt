@@ -21,7 +21,6 @@ import dev.otgformat.usb.UsbTarget
 import me.jahnen.libaums.core.driver.BlockDeviceDriver
 import me.jahnen.libaums.core.driver.BlockDeviceDriverFactory
 import me.jahnen.libaums.core.usb.UsbCommunication
-import me.jahnen.libaums.core.usb.UsbCommunicationFactory
 import java.io.Closeable
 import java.io.IOException
 
@@ -163,15 +162,26 @@ class UsbAccess(private val context: Context) {
      */
     private data class Rung(
         val label: String,
-        val transport: UsbCommunicationFactory.UnderlyingUsbCommunication,
-        val reset: Boolean,
+        /** Issue SET_INTERFACE to select the bulk-only alternate setting. */
+        val selectAlternateSetting: Boolean,
+        /** Issue a bulk-only mass storage reset and clear both endpoint halts. */
+        val bulkReset: Boolean,
     )
 
+    /**
+     * Ways of bringing a drive up, most likely first.
+     *
+     * Selecting the alternate setting comes first because it is what a USB 3
+     * drive needs: the kernel leaves such a drive in its UAS setting, where the
+     * bulk-only endpoints do not exist. The later rungs exist so that a drive
+     * which does not need it, or which refuses SET_INTERFACE, still has a way
+     * through — and so the report says which one it took.
+     */
     private val ladder = listOf(
-        Rung("synchronous transfers", SYNC, reset = false),
-        Rung("synchronous transfers, after a USB reset", SYNC, reset = true),
-        Rung("asynchronous transfers", ASYNC, reset = false),
-        Rung("asynchronous transfers, after a USB reset", ASYNC, reset = true),
+        Rung("the bulk-only alternate setting selected", selectAlternateSetting = true, bulkReset = false),
+        Rung("the bulk-only alternate setting, after a bulk reset", selectAlternateSetting = true, bulkReset = true),
+        Rung("the alternate setting left alone", selectAlternateSetting = false, bulkReset = false),
+        Rung("the alternate setting left alone, after a bulk reset", selectAlternateSetting = false, bulkReset = true),
     )
 
     /**
@@ -201,8 +211,12 @@ class UsbAccess(private val context: Context) {
     /** A successfully opened device, keeping the raw driver for the self-test. */
     private class Opened(val target: OpenTarget, val driver: BlockDeviceDriver)
 
-    private fun openVia(candidate: MassStorageCandidate, rung: Rung): Opened {
-        val communication = createCommunication(candidate, rung)
+    private fun openVia(
+        candidate: MassStorageCandidate,
+        rung: Rung,
+        notes: MutableList<String> = mutableListOf(),
+    ): Opened {
+        val communication = createCommunication(candidate, rung, notes)
         try {
             val driver = BlockDeviceDriverFactory.createBlockDevice(communication, 0)
             val sectorDevice = LibaumsSectorDevice.open(driver)
@@ -224,30 +238,61 @@ class UsbAccess(private val context: Context) {
     /**
      * Opens the transport and performs the Bulk-Only Transport handshake.
      *
-     * The GET MAX LUN control request is the part that was missing when this
-     * first ran on real hardware: libaums issues it in its own setup path
-     * before any command block, and without it the first SCSI command on some
-     * bridges is simply ignored until the recovery attempts run out. It is
-     * legal for a single-LUN device to stall the request, so a failure here is
-     * recorded and ignored rather than treated as fatal.
+     * Three things happen here that libaums' own setup does not do, each one
+     * confirmed necessary on real hardware:
+     *
+     * `setInterface` selects the bulk-only alternate setting. A USB 3 drive
+     * exposes interface 0 twice — setting 0 is bulk-only, setting 1 is UAS —
+     * and the kernel leaves the UAS setting active, so the bulk-only endpoints
+     * do not exist until this call is made. Claiming the interface alone is not
+     * enough.
+     *
+     * The GET MAX LUN request completes the class handshake. It is legal for a
+     * single-LUN device to stall it, so a refusal is recorded, not fatal.
+     *
+     * And the whole thing runs over [DirectUsbCommunication], which uses no
+     * native code — libaums' native helpers do not load on recent Pixels.
      */
-    private fun createCommunication(candidate: MassStorageCandidate, rung: Rung): UsbCommunication {
-        UsbCommunicationFactory.underlyingUsbCommunication = rung.transport
-        // Argument order is (out, in) — swapping them sends every command down
-        // the read endpoint and nothing works.
-        val communication = UsbCommunicationFactory.createUsbCommunication(
-            usbManager,
-            candidate.device,
-            candidate.usbInterface,
-            candidate.outEndpoint,
-            candidate.inEndpoint,
-        )
+    private fun createCommunication(
+        candidate: MassStorageCandidate,
+        rung: Rung,
+        notes: MutableList<String> = mutableListOf(),
+    ): UsbCommunication {
+        val connection = usbManager.openDevice(candidate.device)
+            ?: throw IOException("Android would not open this device.")
         try {
-            if (rung.reset) communication.resetDevice()
-            getMaxLun(communication, candidate)
-            return communication
+            // forceClaim detaches whatever kernel driver holds the interface.
+            if (!connection.claimInterface(candidate.usbInterface, true)) {
+                throw IOException("could not claim the interface")
+            }
+            if (rung.selectAlternateSetting) {
+                if (!connection.setInterface(candidate.usbInterface)) {
+                    throw IOException(
+                        "could not select alternate setting ${candidate.usbInterface.alternateSetting}",
+                    )
+                }
+                notes += "Selected alternate setting ${candidate.usbInterface.alternateSetting} " +
+                    "(bulk-only transport)."
+            }
+
+            val communication = DirectUsbCommunication(
+                connection,
+                candidate.usbInterface,
+                candidate.inEndpoint,
+                candidate.outEndpoint,
+            )
+            try {
+                if (rung.bulkReset) communication.resetDevice()
+                val maxLun = getMaxLun(communication, candidate)
+                notes += if (maxLun >= 0) "GET MAX LUN reported $maxLun."
+                else "The drive declined GET MAX LUN, which is allowed."
+                return communication
+            } catch (t: Throwable) {
+                communication.close()
+                throw t
+            }
         } catch (t: Throwable) {
-            runCatching { communication.close() }
+            runCatching { connection.close() }
             throw t
         }
     }
@@ -300,12 +345,21 @@ class UsbAccess(private val context: Context) {
         var workingRung: String? = null
         for (rung in ladder) {
             if (opened != null) break
+            val rungNotes = mutableListOf<String>()
             try {
-                opened = openVia(candidate, rung)
+                opened = openVia(candidate, rung, rungNotes)
                 workingRung = rung.label
-                steps += SelfTestStep("Open with ${rung.label}", true, "worked")
+                steps += SelfTestStep(
+                    "Open with ${rung.label}",
+                    true,
+                    (listOf("worked") + rungNotes).joinToString(" "),
+                )
             } catch (e: Throwable) {
-                steps += SelfTestStep("Open with ${rung.label}", false, e.describe())
+                steps += SelfTestStep(
+                    "Open with ${rung.label}",
+                    false,
+                    (listOf(e.describe()) + rungNotes).joinToString(" "),
+                )
             }
         }
 
@@ -400,7 +454,5 @@ class UsbAccess(private val context: Context) {
         private const val GET_MAX_LUN_REQUEST_TYPE = 0xA1
         private const val GET_MAX_LUN_REQUEST = 0xFE
 
-        private val SYNC = UsbCommunicationFactory.UnderlyingUsbCommunication.DEVICE_CONNECTION_SYNC
-        private val ASYNC = UsbCommunicationFactory.UnderlyingUsbCommunication.USB_REQUEST_ASYNC
     }
 }
