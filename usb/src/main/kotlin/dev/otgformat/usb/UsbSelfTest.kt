@@ -1,5 +1,11 @@
 package dev.otgformat.usb
 
+import dev.otgformat.core.BootSector
+import dev.otgformat.core.formatBytes
+import dev.otgformat.core.Mbr
+import dev.otgformat.core.getU16
+import dev.otgformat.core.getU32
+import dev.otgformat.core.getU8
 import me.jahnen.libaums.core.driver.BlockDeviceDriver
 import java.nio.ByteBuffer
 import java.util.Locale
@@ -110,8 +116,9 @@ object UsbSelfTest {
         steps += SelfTestStep(
             "First sector readable",
             first.isSuccess,
-            first.fold({ describeSector0(it) }, { "failed: ${it.describe()}" }),
+            first.fold({ "read" }, { "failed: ${it.describe()}" }),
         )
+        first.getOrNull()?.let { notes += describeContents(driver, it, blockSize) }
 
         val last = readSector(driver, sectorCount - 1, blockSize)
         steps += SelfTestStep(
@@ -185,14 +192,75 @@ object UsbSelfTest {
             buffer
         }
 
-    /** Says what is on sector 0 now, so the user can tell they picked the right device. */
-    private fun describeSector0(sector: ByteArray): String {
-        val signature = (sector[510].toInt() and 0xFF) or ((sector[511].toInt() and 0xFF) shl 8)
-        val blank = sector.all { it == 0.toByte() }
-        return when {
-            blank -> "currently blank"
-            signature == 0xAA55 -> "currently holds a partition table or boot sector"
-            else -> "currently holds data with no partition signature"
+    /**
+     * Reads back what is actually on the drive right now.
+     *
+     * Saying only "holds a partition table" is useless for the question people
+     * actually have after a format — did it work? — because that is equally
+     * true of the table that was there before. This reads the partition entry
+     * and the filesystem's own boot sector and reports what they say, so the
+     * answer is in the report rather than left to inference.
+     */
+    private fun describeContents(driver: BlockDeviceDriver, sector0: ByteArray, blockSize: Int): String =
+        buildString {
+            appendLine("What is on the drive now")
+
+            if (sector0.all { it == 0.toByte() }) {
+                append("  first sector is blank — no partition table")
+                return@buildString
+            }
+            if (sector0.getU16(Mbr.SIGNATURE_OFFSET) != 0xAA55) {
+                append("  first sector holds data but no partition-table signature")
+                return@buildString
+            }
+
+            var described = false
+            for (entry in 0 until 4) {
+                val at = Mbr.PARTITION_TABLE_OFFSET + entry * 16
+                val type = sector0.getU8(at + 0x04)
+                if (type == 0) continue
+                described = true
+                val start = sector0.getU32(at + 0x08)
+                val count = sector0.getU32(at + 0x0C)
+                appendLine(
+                    "  partition ${entry + 1}: type 0x%02x%s, start sector %d, %d sectors (%s)".format(
+                        type,
+                        if (type == Mbr.TYPE_FAT32_LBA) " (FAT32 LBA)" else "",
+                        start,
+                        count,
+                        formatGb(count * blockSize),
+                    ),
+                )
+                appendFilesystem(driver, start, blockSize)
+            }
+            if (!described) append("  a partition table with no partitions in it")
+        }.trimEnd()
+
+    /** Reads a partition's boot sector and reports what the filesystem says about itself. */
+    private fun StringBuilder.appendFilesystem(driver: BlockDeviceDriver, startSector: Long, blockSize: Int) {
+        val boot = readSector(driver, startSector, blockSize).getOrNull() ?: run {
+            appendLine("    could not read its boot sector")
+            return
+        }
+        if (boot.getU16(BootSector.OFF_SIGNATURE) != 0xAA55) {
+            appendLine("    no filesystem signature at the start of the partition")
+            return
+        }
+        val type = String(boot, BootSector.OFF_FS_TYPE, 8, Charsets.US_ASCII).trim()
+        val oem = String(boot, BootSector.OFF_OEM, 8, Charsets.US_ASCII).trim()
+        val label = String(boot, BootSector.OFF_VOLUME_LABEL, 11, Charsets.US_ASCII).trim()
+        val bytesPerSector = boot.getU16(BootSector.OFF_BYTES_PER_SECTOR)
+        val sectorsPerCluster = boot.getU8(BootSector.OFF_SECTORS_PER_CLUSTER)
+        val hidden = boot.getU32(BootSector.OFF_HIDDEN_SECTORS)
+        appendLine("    filesystem: $type, label \"$label\", written by \"$oem\"")
+        // formatBytes, not a division: a 512-byte cluster renders as "0 KiB"
+        // otherwise, which is the same defect this project already fixed once
+        // in the confirmation screen.
+        appendLine(
+            "    ${formatBytes(sectorsPerCluster * bytesPerSector)} clusters, hidden sectors $hidden",
+        )
+        if (oem == "MSWIN4.1" && hidden == startSector) {
+            appendLine("    this is consistent with a volume this app wrote")
         }
     }
 

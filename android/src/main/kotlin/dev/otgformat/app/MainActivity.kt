@@ -128,6 +128,9 @@ private fun FormatScreen(viewModel: FormatViewModel) {
 
 @Composable
 private fun SetupScreen(state: UiState, viewModel: FormatViewModel) {
+    val context = LocalContext.current
+    var crash by remember { mutableStateOf(CrashReporter.read(context)) }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -136,6 +139,44 @@ private fun SetupScreen(state: UiState, viewModel: FormatViewModel) {
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text("OTGFormat", style = MaterialTheme.typography.headlineSmall)
+
+        // A crash takes its stack trace with it, and asking for a logcat
+        // capture is asking someone to become a developer. It is saved to a
+        // file instead and offered here on the next launch.
+        crash?.let { report ->
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        "The app closed unexpectedly last time",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    Text(
+                        "Sending this makes the cause obvious. It contains no personal data — " +
+                            "the phone model, the app version, and where the code stopped.",
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        report,
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { copyToClipboard(context, report) }) { Text("Copy") }
+                        OutlinedButton(onClick = { shareText(context, report, "OTGFormat crash") }) {
+                            Text("Share")
+                        }
+                        TextButton(onClick = {
+                            CrashReporter.clear(context)
+                            crash = null
+                        }) { Text("Dismiss") }
+                    }
+                }
+            }
+        }
 
         // ---- device picker ------------------------------------------------
         Text("Device", style = MaterialTheme.typography.titleMedium)
@@ -328,21 +369,10 @@ private fun SelfTestCard(report: SelfTestReport, target: UsbTarget?, onDismiss: 
             )
             Text(text, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(onClick = {
-                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    clipboard.setPrimaryClip(ClipData.newPlainText("OTGFormat self-test", text))
-                }) { Text("Copy") }
-                OutlinedButton(onClick = {
-                    context.startActivity(
-                        Intent.createChooser(
-                            Intent(Intent.ACTION_SEND)
-                                .setType("text/plain")
-                                .putExtra(Intent.EXTRA_SUBJECT, "OTGFormat self-test")
-                                .putExtra(Intent.EXTRA_TEXT, text),
-                            "Send report",
-                        ),
-                    )
-                }) { Text("Share") }
+                OutlinedButton(onClick = { copyToClipboard(context, text) }) { Text("Copy") }
+                OutlinedButton(onClick = { shareText(context, text, "OTGFormat self-test") }) {
+                    Text("Share")
+                }
                 TextButton(onClick = onDismiss) { Text("Hide") }
             }
         }
@@ -440,6 +470,23 @@ private fun Dropdown(label: String, selected: String, options: List<String>, onS
             }
         }
     }
+}
+
+private fun copyToClipboard(context: Context, text: String) {
+    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    clipboard.setPrimaryClip(ClipData.newPlainText("OTGFormat", text))
+}
+
+private fun shareText(context: Context, text: String, subject: String) {
+    context.startActivity(
+        Intent.createChooser(
+            Intent(Intent.ACTION_SEND)
+                .setType("text/plain")
+                .putExtra(Intent.EXTRA_SUBJECT, subject)
+                .putExtra(Intent.EXTRA_TEXT, text),
+            "Send report",
+        ),
+    )
 }
 
 /** Cluster sizes FAT32 accepts, from the minimum sector to the practical maximum. */

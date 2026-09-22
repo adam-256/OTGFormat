@@ -88,13 +88,34 @@ class UsbSelfTestTest {
     }
 
     @Test
-    fun `the report says what is currently on the first sector`() {
-        val fake = FakeBlockDeviceDriver(trueSectorCount = 8192)
-        assertTrue("currently blank" in report(fake).asText())
+    fun `the report says what is actually on the drive`() {
+        // "Holds a partition table" is equally true before and after a format,
+        // so it cannot answer the question people have afterwards. The report
+        // has to say what the table and the filesystem actually claim.
+        val blank = FakeBlockDeviceDriver(trueSectorCount = 8192)
+        assertTrue("no partition table" in report(blank).asText())
 
-        val withTable = FakeBlockDeviceDriver(trueSectorCount = 8192)
-        withTable.store[510] = 0x55
-        withTable.store[511] = 0xAA.toByte()
-        assertTrue("partition table or boot sector" in report(withTable).asText())
+        // 64 MiB is the smallest volume that is legal FAT32.
+        val formatted = FakeBlockDeviceDriver(trueSectorCount = 64L * 1024 * 1024 / 512)
+        writeFat32Volume(formatted, label = "MFLASH")
+        val text = report(formatted).asText()
+        println(text)
+        assertTrue("type 0x0c (FAT32 LBA)" in text, text)
+        assertTrue("start sector 2048" in text, text)
+        assertTrue("FAT32" in text, text)
+        assertTrue("\"MFLASH\"" in text, text)
+        assertTrue("consistent with a volume this app wrote" in text, text)
+        // The cluster size must never render as "0 KiB", which is what a plain
+        // division does to a 512-byte cluster.
+        assertTrue(!Regex("""(^|[^\d.])0 (B|KiB|MiB)""").containsMatchIn(text), text)
+    }
+
+    /** Formats the fake with the real formatter, so the report reads a genuine volume. */
+    private fun writeFat32Volume(fake: FakeBlockDeviceDriver, label: String) {
+        val device = LibaumsSectorDevice(fake, fake.blockSize, fake.trueSectorCount, 64)
+        dev.otgformat.core.Formatter.format(
+            device,
+            dev.otgformat.core.FormatOptions(label = label, volumeSerial = 1),
+        )
     }
 }

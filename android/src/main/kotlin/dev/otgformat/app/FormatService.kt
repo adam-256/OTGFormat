@@ -46,7 +46,21 @@ class FormatService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int = try {
+        start(intent)
+    } catch (t: Throwable) {
+        // Anything thrown here would otherwise kill the process before the
+        // format's own error handling could report it.
+        FormatController.update(
+            FormatState.Failed(
+                "The format could not be started: ${t.message ?: t.javaClass.simpleName}",
+            ),
+        )
+        runCatching { stopSelf() }
+        START_NOT_STICKY
+    }
+
+    private fun start(intent: Intent?): Int {
         if (intent == null || FormatController.isRunning) return START_NOT_STICKY
 
         @Suppress("DEPRECATION")
@@ -68,13 +82,30 @@ class FormatService : Service() {
             bootable = intent.getBooleanExtra(EXTRA_BOOTABLE, false),
         )
 
-        startForeground()
+        // A foreground service is what stops Android reclaiming the process
+        // mid-write, but from Android 14 the platform can refuse to start one
+        // whose declared type it does not think is justified. Refusing to
+        // format at all would be the wrong response to that: the wake lock
+        // still holds, and a format the user is watching will normally finish.
+        // So the failure is recorded and the work goes ahead.
+        val foregroundFailure = try {
+            startForegroundNotification()
+            null
+        } catch (t: Throwable) {
+            "${t.javaClass.simpleName}: ${t.message ?: "no detail"}"
+        }
+
         FormatController.beginRun()
-        scope.launch { runFormat(usbDevice, interfaceId, options) }
+        scope.launch { runFormat(usbDevice, interfaceId, options, foregroundFailure) }
         return START_NOT_STICKY
     }
 
-    private fun runFormat(usbDevice: UsbDevice, interfaceId: Int, options: FormatOptions) {
+    private fun runFormat(
+        usbDevice: UsbDevice,
+        interfaceId: Int,
+        options: FormatOptions,
+        foregroundFailure: String?,
+    ) {
         val power = getSystemService(Context.POWER_SERVICE) as PowerManager
         val wakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKE_LOCK_TAG)
         wakeLock.setReferenceCounted(false)
@@ -111,7 +142,18 @@ class FormatService : Service() {
             }
 
             val result = Formatter.format(open.sectorDevice, options, progress)
-            FormatController.update(FormatState.Done(name, result.describe()))
+            val summary = buildString {
+                append(result.describe())
+                if (foregroundFailure != null) {
+                    appendLine()
+                    appendLine(
+                        "Note: Android refused this app a foreground service ($foregroundFailure). " +
+                            "The format ran anyway and completed, but leaving the app during a long " +
+                            "format may interrupt it until that is addressed.",
+                    )
+                }
+            }
+            FormatController.update(FormatState.Done(name, summary))
             notify(finishedNotification("Format complete", name))
         } catch (e: FormatCancelledException) {
             FormatController.update(
@@ -136,17 +178,20 @@ class FormatService : Service() {
         } catch (e: Throwable) {
             FormatController.update(
                 FormatState.Failed(
-                    e.message ?: e.javaClass.simpleName,
-                    "If the drive is mounted, eject it in Files first — another app holding the interface " +
-                        "will stop this one from claiming it.",
+                    "${e.javaClass.simpleName}: ${e.message ?: "no detail"}",
+                    listOfNotNull(
+                        "If the drive is mounted, eject it in Files first — another app holding the " +
+                            "interface will stop this one from claiming it.",
+                        foregroundFailure?.let { "Android also refused a foreground service here ($it)." },
+                    ).joinToString("\n\n"),
                 ),
             )
             notify(finishedNotification("Format failed", e.message ?: ""))
         } finally {
             open?.close()
             runCatching { wakeLock.release() }
-            ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_DETACH)
-            stopSelf()
+            runCatching { ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_DETACH) }
+            runCatching { stopSelf() }
         }
     }
 
@@ -157,7 +202,7 @@ class FormatService : Service() {
 
     // ---- notifications ----------------------------------------------------
 
-    private fun startForeground() {
+    private fun startForegroundNotification() {
         createChannel()
         val notification = progressNotification("Preparing", 0, 0)
         // The connectedDevice type is what this work actually is, and from
