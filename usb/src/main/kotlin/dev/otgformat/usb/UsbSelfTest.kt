@@ -55,6 +55,10 @@ data class SelfTestReport(
  */
 object UsbSelfTest {
 
+    /** exFAT states bytes per sector as a power of two, here. */
+    private const val EXFAT_BYTES_PER_SECTOR_SHIFT = 108
+    private const val EXFAT_SECTORS_PER_CLUSTER_SHIFT = 109
+
     /** Transfer sizes to probe, in bytes. The default chunk is in the middle. */
     val PROBE_SIZES = listOf(32 * 1024, 64 * 1024, 128 * 1024, 256 * 1024, 512 * 1024, 1024 * 1024)
 
@@ -236,7 +240,16 @@ object UsbSelfTest {
             if (!described) append("  a partition table with no partitions in it")
         }.trimEnd()
 
-    /** Reads a partition's boot sector and reports what the filesystem says about itself. */
+    /**
+     * Reads a partition's boot sector and reports what the filesystem says
+     * about itself.
+     *
+     * Dispatching on the OEM string matters: a drive's factory filesystem is
+     * usually exFAT, whose boot sector leaves the FAT-era geometry fields
+     * zeroed. Parsing it as FAT32 anyway produced "0 B clusters" and a label
+     * of binary rubbish — worse than saying nothing, because it looks like a
+     * corrupted FAT32 volume rather than a perfectly healthy exFAT one.
+     */
     private fun StringBuilder.appendFilesystem(driver: BlockDeviceDriver, startSector: Long, blockSize: Int) {
         val boot = readSector(driver, startSector, blockSize).getOrNull() ?: run {
             appendLine("    could not read its boot sector")
@@ -246,21 +259,44 @@ object UsbSelfTest {
             appendLine("    no filesystem signature at the start of the partition")
             return
         }
-        val type = String(boot, BootSector.OFF_FS_TYPE, 8, Charsets.US_ASCII).trim()
+
         val oem = String(boot, BootSector.OFF_OEM, 8, Charsets.US_ASCII).trim()
-        val label = String(boot, BootSector.OFF_VOLUME_LABEL, 11, Charsets.US_ASCII).trim()
-        val bytesPerSector = boot.getU16(BootSector.OFF_BYTES_PER_SECTOR)
-        val sectorsPerCluster = boot.getU8(BootSector.OFF_SECTORS_PER_CLUSTER)
-        val hidden = boot.getU32(BootSector.OFF_HIDDEN_SECTORS)
-        appendLine("    filesystem: $type, label \"$label\", written by \"$oem\"")
-        // formatBytes, not a division: a 512-byte cluster renders as "0 KiB"
-        // otherwise, which is the same defect this project already fixed once
-        // in the confirmation screen.
-        appendLine(
-            "    ${formatBytes(sectorsPerCluster * bytesPerSector)} clusters, hidden sectors $hidden",
-        )
-        if (oem == "MSWIN4.1" && hidden == startSector) {
-            appendLine("    this is consistent with a volume this app wrote")
+        val fsType = String(boot, BootSector.OFF_FS_TYPE, 8, Charsets.US_ASCII).trim()
+
+        when {
+            oem.equals("EXFAT", ignoreCase = true) -> {
+                // exFAT states its geometry as powers of two, in bytes the FAT
+                // layout does not use.
+                val bytesPerSector = 1 shl boot.getU8(EXFAT_BYTES_PER_SECTOR_SHIFT)
+                val sectorsPerCluster = 1 shl boot.getU8(EXFAT_SECTORS_PER_CLUSTER_SHIFT)
+                appendLine("    filesystem: exFAT — not written by this app")
+                appendLine("    ${formatBytes(bytesPerSector.toLong() * sectorsPerCluster)} clusters")
+                appendLine("    this looks like the drive's original factory filesystem")
+            }
+
+            oem.startsWith("NTFS") -> {
+                appendLine("    filesystem: NTFS — not written by this app")
+            }
+
+            fsType.startsWith("FAT") -> {
+                val label = String(boot, BootSector.OFF_VOLUME_LABEL, 11, Charsets.US_ASCII).trim()
+                val bytesPerSector = boot.getU16(BootSector.OFF_BYTES_PER_SECTOR)
+                val sectorsPerCluster = boot.getU8(BootSector.OFF_SECTORS_PER_CLUSTER)
+                val hidden = boot.getU32(BootSector.OFF_HIDDEN_SECTORS)
+                appendLine("    filesystem: $fsType, label \"$label\", written by \"$oem\"")
+                appendLine(
+                    // formatBytes, not a division: a 512-byte cluster renders
+                    // as "0 KiB" otherwise, which is the same defect this
+                    // project already fixed once on the confirmation screen.
+                    "    ${formatBytes(sectorsPerCluster * bytesPerSector)} clusters, " +
+                        "hidden sectors $hidden",
+                )
+                if (oem == "MSWIN4.1" && hidden == startSector) {
+                    appendLine("    this is consistent with a volume this app wrote")
+                }
+            }
+
+            else -> appendLine("    filesystem: not recognised (OEM string \"$oem\")")
         }
     }
 

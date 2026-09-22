@@ -61,7 +61,25 @@ object FormatController {
 
     private val cancelRequested = AtomicBoolean(false)
 
+    /**
+     * Whether the service has taken the job.
+     *
+     * Deliberately separate from [state]. Re-entrancy has to be judged by what
+     * the service is doing, not by what the screen is showing: the UI marks a
+     * format as running the moment the button is pressed, so a guard that read
+     * the displayed state would always find a format already in progress and
+     * refuse to start the real one.
+     */
+    private val claimed = AtomicBoolean(false)
+
     val isRunning: Boolean get() = _state.value is FormatState.Running
+
+    /** Takes the job, or returns false if a format is already under way. */
+    internal fun claim(): Boolean = claimed.compareAndSet(false, true)
+
+    internal fun release() {
+        claimed.set(false)
+    }
 
     internal fun update(state: FormatState) {
         _state.value = state

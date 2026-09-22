@@ -110,6 +110,35 @@ class UsbSelfTestTest {
         assertTrue(!Regex("""(^|[^\d.])0 (B|KiB|MiB)""").containsMatchIn(text), text)
     }
 
+    @Test
+    fun `an exFAT drive is named rather than misread as broken FAT32`() {
+        // A drive's factory filesystem is usually exFAT, whose boot sector
+        // leaves the FAT geometry fields zeroed. Reading it as FAT32 produced
+        // "0 B clusters" and a binary label — which looks like a corrupted
+        // volume rather than a healthy one.
+        val fake = FakeBlockDeviceDriver(trueSectorCount = 8192)
+        // A minimal MBR pointing at a partition at sector 64.
+        fake.store[0x1BE + 0x04] = 0x07
+        fake.store[0x1BE + 0x08] = 64
+        fake.store[0x1BE + 0x0C] = 64
+        fake.store[510] = 0x55
+        fake.store[511] = 0xAA.toByte()
+        // An exFAT boot sector at that partition.
+        val at = 64 * 512
+        "EXFAT   ".forEachIndexed { i, c -> fake.store[at + 3 + i] = c.code.toByte() }
+        fake.store[at + 108] = 9   // 512-byte sectors
+        fake.store[at + 109] = 8   // 256 sectors per cluster
+        fake.store[at + 510] = 0x55
+        fake.store[at + 511] = 0xAA.toByte()
+
+        val text = report(fake).asText()
+        println(text)
+        assertTrue("exFAT" in text, text)
+        assertTrue("not written by this app" in text, text)
+        assertTrue("128 KiB clusters" in text, text)
+        assertTrue(!Regex("""(^|[^\d.])0 (B|KiB|MiB)""").containsMatchIn(text), text)
+    }
+
     /** Formats the fake with the real formatter, so the report reads a genuine volume. */
     private fun writeFat32Volume(fake: FakeBlockDeviceDriver, label: String) {
         val device = LibaumsSectorDevice(fake, fake.blockSize, fake.trueSectorCount, 64)
