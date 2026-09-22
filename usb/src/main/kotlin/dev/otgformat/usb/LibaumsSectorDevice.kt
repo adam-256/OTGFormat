@@ -139,13 +139,18 @@ class LibaumsSectorDevice internal constructor(
         /**
          * Bytes per SCSI command.
          *
-         * 16 KiB is what `UsbDeviceConnection.bulkTransfer` documents as its
-         * supported maximum; larger transfers work on some devices and fail on
-         * others, and a formatter is the wrong place to gamble. [write] halves
-         * this on the fly if even that proves too much, so the figure is a
-         * starting point rather than a promise.
+         * Measured on a SanDisk 3.2Gen1 over a Pixel 10, every size from 32 KiB
+         * to 1 MiB was accepted: 32 KiB gave 38 MB/s, 128 KiB 95 MB/s and
+         * 256 KiB 135 MB/s. 128 KiB is taken as the default rather than the
+         * fastest measured size because the same run also produced an
+         * unexplained dip at 512 KiB, and a formatter has nothing to gain from
+         * sitting near a cliff — the whole write for a 61.5 GB volume is about
+         * 16 MB, so the difference is a fraction of a second either way.
+         *
+         * Transfers are halved on the fly if a bridge refuses this, so the
+         * figure is a starting point rather than a promise.
          */
-        const val DEFAULT_MAX_TRANSFER_BYTES = 16 * 1024
+        const val DEFAULT_MAX_TRANSFER_BYTES = 128 * 1024
 
         /** READ(10) and WRITE(10) address blocks with 32 unsigned bits. */
         const val MAX_ADDRESSABLE_SECTOR = 0xFFFF_FFFFL

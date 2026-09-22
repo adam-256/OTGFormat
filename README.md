@@ -3,10 +3,10 @@
 An Android app that formats USB mass-storage devices over OTG, without root,
 with full control of filesystem, cluster size, label, and partition table.
 
-**Current state: Phase 0 and Phase 1 complete. The APK builds and is
-downloadable; everything except the USB transport itself is verified against
-independent tools.** See [Phase 1](#phase-1--the-android-layer) for exactly
-what is proven and what still needs a real drive.
+**Current state: Phase 0 and Phase 1 complete and confirmed on hardware.** The
+FAT32 writer is verified against `dosfstools`, and the USB path has been
+exercised on a real drive — a SanDisk 3.2Gen1 over a Pixel 10 running
+Android 17 — where the in-app self-test now passes every check.
 
 ```
 ./gradlew test
@@ -359,25 +359,48 @@ throwing path is funnelled through the planner and comes back as a message.
 That was a real bug in the first draft of the ViewModel, and it is now covered
 by a test.
 
-### What is *not* verified
+### What running it on hardware changed
 
 The `:android` module cannot be compiled in the container this was written in —
 no Android SDK, and `dl.google.com` is refused by the egress policy — so it is
-built by GitHub Actions instead and the APK is published to the `latest-debug`
-release. It compiles clean and the shipped APK has been checked to contain the
-manifest entries, the compiled `device_filter.xml` and every `core`/`usb` class
-it should.
+built by GitHub Actions and published to the `latest-debug` release.
 
-Compiling is not running, though. These need a real drive and are what the
-self-test measures:
+Three defects survived every off-device check and were only found by running
+the self-test on a real drive. Each is worth recording, because none of them
+would have been caught by more testing of the kind already being done.
 
-- whether `forceClaim` takes the interface when Android has already mounted the
-  drive
-- whether the USB permission dialog returns with `EXTRA_DEVICE` populated —
-  the `FLAG_MUTABLE` path
-- what transfer sizes the bridge actually accepts, and whether 128 KiB is the
-  right default
-- foreground-service behaviour on recent Android
+**libaums never selects the alternate setting.** A USB 3 drive exposes
+interface 0 twice — setting 0 is bulk-only transport, setting 1 is UAS — and
+the kernel leaves the UAS setting active. The bulk-only endpoints do not exist
+while it is, so every transfer failed against an endpoint that was not there.
+Claiming an interface does not select an alternate setting;
+`UsbDeviceConnection.setInterface` does, and libaums never calls it. This is why
+`DirectUsbCommunication` exists rather than libaums' own transport.
+
+**Its native helpers do not load on recent Pixels.** `libusb-lib.so` in libaums
+0.10.0 predates 16 KB memory pages, so `System.loadLibrary` fails and every
+native call throws. That silently disables its device reset, its endpoint
+halt-clearing, and its `errno` lookup — which is why its own errors read
+"errno 0 null". Both operations are ordinary USB control requests and are done
+here without native code.
+
+**The capacity probe stalled the drive.** Determining whether `blocks` meant a
+count or a last address by reading one sector *past* the end is harmless
+against a file and destructive against hardware: the drive stalls its bulk
+endpoint and every later transfer fails. The tell was a single report
+containing two different sector counts for the same drive — one measured before
+the probe, one after. Capacity is now decided by driver type and verified by
+reading the last sector that answer implies, never beyond it.
+
+Measured on that drive: 38 MB/s at 32 KiB, 95 MB/s at 128 KiB, 135 MB/s at
+256 KiB, with every size up to 1 MiB accepted.
+
+### Still unconfirmed
+
+Writing. The self-test is read-only by design, so the format path — the MBR,
+the FAT clear, the read-back verification, the foreground service and wake lock
+over a multi-minute write — has been exercised against files and fakes but not
+yet against this drive.
 
 To build it locally instead:
 
